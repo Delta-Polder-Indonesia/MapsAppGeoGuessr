@@ -16,18 +16,18 @@ export type HistoryMessage = {
   items: LocationMessage[];
 };
 
-export type ServerMessage = 
-  | LocationMessage 
-  | HistoryMessage 
+export type ServerMessage =
+  | LocationMessage
+  | HistoryMessage
   | { type: 'hello'; role: string }
   | { type: 'pong' }
   | { type: 'error'; message: string };
 
-export type ClientMessage = 
-  | LocationMessage 
+export type ClientMessage =
+  | LocationMessage
   | { type: 'ping' };
 
 export interface Env {
-  RELAY_ROOM: DurableObjectNamespace;
+  RELAY_ROOM: 'DurableObjectNamespace';
   ENVIRONMENT: string;
 }

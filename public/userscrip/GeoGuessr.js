@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🏆 #1. GeoGuessr A.M.A.S (Advanced Mapping Analysis System)
 // @namespace    https://github.com/JD-YH03D/release
-// @version      2.1.1
+// @version      2.1.2
 // @description  Professional GeoGuessr enhancement suite featuring real-time map analysis, coordinate intelligence, metadata extraction, and advanced exploration utilities.
 // @author       Bintang Toba Pro
 // @license      MIT
@@ -68,7 +68,7 @@ AUTO PIN MODE:
  * - Safe mode for anti-detection
  * @ __btpDebug.getProtectionState()
  * @author Bintang Toba Pro
- * @version 2.1.1
+ * @version 2.1.2
  * @license MIT
  * ============================================================================
  */
@@ -87,13 +87,13 @@ AUTO PIN MODE:
     const CONFIG = Object.freeze({
 
         NAME: 'Bintang Toba Pro',
-        VERSION: '2.1.1',
+        VERSION: '2.1.2',
         DEBUG: false, // Set to true for verbose logging
 
         NOMINATIM_URL: 'https://nominatim.openstreetmap.org/reverse',
         LEAFLET_CSS: 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
         LEAFLET_JS: 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
-        VERSION_METADATA_URL: 'https://api.npoint.io/65be7341bb21bbcf9458',
+        VERSION_METADATA_URL: 'https://api.npoint.io/1e372530fb1113d8afc6',
 
         STORAGE_KEYS: Object.freeze({
             DISCORD_WEBHOOK: 'bintang_toba_discord_webhook',
@@ -255,6 +255,18 @@ AUTO PIN MODE:
             USE_REQUEST_TOKENING: false,
             USE_DEGRADED_MODE: false,
             ENABLE_SHADOW_EXTRACTION_TELEMETRY: true
+        }),
+
+        REALTIME_CONFIG: Object.freeze({
+            WS_URL: "wss://YOUR_WORKER_URL/ws?room=main&role=sender",
+            MAP_URL: "https://delta-polder-indonesia.github.io/MapsAppGeoGuessr/",
+            ROOM: "main",
+            HEARTBEAT_INTERVAL: 30000,
+            RECONNECT_MIN_DELAY: 1000,
+            RECONNECT_MAX_DELAY: 30000,
+            QUEUE_SIZE_LIMIT: 50,
+            RATE_LIMIT_MS: 500,
+            DEBUG: true
         })
     });
 
@@ -296,6 +308,15 @@ AUTO PIN MODE:
         markerPlacedThisRound: false,
         _pendingAddressCoords: null,
         _uiRefs: null,
+
+        ws: {
+            status: 'Disconnected',
+            messagesSent: 0,
+            messagesQueued: 0,
+            reconnectCount: 0,
+            lastUpdateTime: null,
+            room: 'main'
+        },
 
         runtime: {
             flags: { ...CONFIG.FLAGS },
@@ -600,6 +621,270 @@ AUTO PIN MODE:
     }
 
     // ========================================================================
+    // [SECTION 5-C] REALTIME WEBSOCKET TRACKER
+    // ========================================================================
+
+    /**
+     * RealtimeTracker module for handling WebSocket connection,
+     * auto-reconnect, heartbeat, and message queuing.
+     */
+    const RealtimeTracker = (function () {
+        let socket = null;
+        let reconnectAttempts = 0;
+        let reconnectTimeout = null;
+        let heartbeatInterval = null;
+        let messageQueue = [];
+        let lastMessageSentAt = 0;
+
+        /**
+         * Update the connection status and trigger UI refresh.
+         * @param {string} status - New status (Connecting, Connected, etc.)
+         */
+        const setStatus = (status) => {
+            state.ws.status = status;
+            state.ws.lastUpdateTime = Date.now();
+            Logger.debug(`[WS] Status: ${status}`);
+            updateWsDisplay();
+        };
+
+        /**
+         * Update the debug panel UI elements if they exist.
+         */
+        const updateWsDisplay = () => {
+            const statusEl = document.getElementById('ws-status-val');
+            const sentEl = document.getElementById('ws-sent-val');
+            const queuedEl = document.getElementById('ws-queued-val');
+            const reconnectEl = document.getElementById('ws-reconnect-val');
+            const timeEl = document.getElementById('ws-time-val');
+            const roomEl = document.getElementById('ws-room-val');
+
+            if (statusEl) {
+                statusEl.textContent = state.ws.status;
+                const colors = {
+                    'Connected': '#10b981',
+                    'Connecting': '#3b82f6',
+                    'Reconnecting': '#f59e0b',
+                    'Disconnected': '#ef4444'
+                };
+                statusEl.style.color = colors[state.ws.status] || '#94a3b8';
+            }
+            if (sentEl) sentEl.textContent = state.ws.messagesSent;
+            if (queuedEl) queuedEl.textContent = state.ws.messagesQueued;
+            if (reconnectEl) reconnectEl.textContent = state.ws.reconnectCount;
+            if (roomEl) roomEl.textContent = CONFIG.REALTIME_CONFIG.ROOM;
+            if (timeEl && state.ws.lastUpdateTime) {
+                timeEl.textContent = new Date(state.ws.lastUpdateTime).toLocaleTimeString();
+            }
+        };
+
+        /**
+         * Establish a WebSocket connection.
+         */
+        const connect = () => {
+            if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+                return;
+            }
+
+            setStatus('Connecting');
+            try {
+                socket = new WebSocket(CONFIG.REALTIME_CONFIG.WS_URL);
+
+                socket.onopen = () => {
+                    setStatus('Connected');
+                    reconnectAttempts = 0;
+                    startHeartbeat();
+                    flushQueue();
+                };
+
+                socket.onmessage = (event) => {
+                    if (event.data === 'pong') {
+                        Logger.debug('[WS] Pong received');
+                    }
+                };
+
+                socket.onclose = (event) => {
+                    if (state.ws.status !== 'Disconnected') {
+                        setStatus('Disconnected');
+                    }
+                    stopHeartbeat();
+                    if (event.code !== 1000) {
+                        scheduleReconnect();
+                    }
+                };
+
+                socket.onerror = (error) => {
+                    Logger.error('[WS] Error encountered');
+                    socket.close();
+                };
+            } catch (e) {
+                Logger.error('[WS] Connection failed');
+                scheduleReconnect();
+            }
+        };
+
+        /**
+         * Disconnect the WebSocket connection.
+         */
+        const disconnect = () => {
+            if (reconnectTimeout) clearTimeout(reconnectTimeout);
+            stopHeartbeat();
+            if (socket) {
+                socket.close(1000, 'Normal Closure');
+                socket = null;
+            }
+            setStatus('Disconnected');
+        };
+
+        /**
+         * Schedule a reconnection attempt with exponential backoff.
+         */
+        const scheduleReconnect = () => {
+            if (reconnectTimeout) clearTimeout(reconnectTimeout);
+            setStatus('Reconnecting');
+            state.ws.reconnectCount++;
+
+            const delay = Math.min(
+                CONFIG.REALTIME_CONFIG.RECONNECT_MIN_DELAY * Math.pow(2, reconnectAttempts),
+                CONFIG.REALTIME_CONFIG.RECONNECT_MAX_DELAY
+            );
+
+            reconnectAttempts++;
+            Logger.debug(`[WS] Reconnecting in ${delay}ms (attempt ${reconnectAttempts})`);
+            reconnectTimeout = setTimeout(connect, delay);
+        };
+
+        /**
+         * Start the heartbeat (ping) to keep connection alive.
+         */
+        const startHeartbeat = () => {
+            stopHeartbeat();
+            heartbeatInterval = setInterval(() => {
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.send('ping');
+                    Logger.debug('[WS] Ping sent');
+                }
+            }, CONFIG.REALTIME_CONFIG.HEARTBEAT_INTERVAL);
+        };
+
+        /**
+         * Stop the heartbeat interval.
+         */
+        const stopHeartbeat = () => {
+            if (heartbeatInterval) clearInterval(heartbeatInterval);
+            heartbeatInterval = null;
+        };
+
+        /**
+         * Validate the message payload before sending.
+         * @param {Object} data - Payload to validate
+         * @returns {boolean}
+         */
+        const validatePayload = (data) => {
+            if (!data || typeof data !== 'object') return false;
+            if (data.type === 'location') {
+                if (!Validators.isValidCoord(data.lat, data.lng)) return false;
+                if (typeof data.round !== 'number' || data.round < 0) return false;
+            }
+            return true;
+        };
+
+        /**
+         * Send a JSON payload via WebSocket.
+         * @param {Object} payload - Data to send
+         * @returns {boolean} - Success status
+         */
+        const send = (payload) => {
+            if (!validatePayload(payload)) {
+                Logger.warn('[WS] Invalid payload rejected');
+                return false;
+            }
+
+            const now = Date.now();
+            if (now - lastMessageSentAt < CONFIG.REALTIME_CONFIG.RATE_LIMIT_MS) {
+                return false;
+            }
+
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify(payload));
+                state.ws.messagesSent++;
+                lastMessageSentAt = now;
+                updateWsDisplay();
+                return true;
+            } else {
+                if (messageQueue.length < CONFIG.REALTIME_CONFIG.QUEUE_SIZE_LIMIT) {
+                    // Duplicate prevention for latest location
+                    if (payload.type === 'location') {
+                        const last = messageQueue[messageQueue.length - 1];
+                        if (last && last.type === 'location' && last.lat === payload.lat && last.lng === payload.lng) {
+                            return false;
+                        }
+                    }
+                    messageQueue.push(payload);
+                    state.ws.messagesQueued = messageQueue.length;
+                    updateWsDisplay();
+                }
+                return false;
+            }
+        };
+
+        /**
+         * Flush the message queue upon reconnection.
+         */
+        const flushQueue = () => {
+            while (messageQueue.length > 0 && socket && socket.readyState === WebSocket.OPEN) {
+                const payload = messageQueue.shift();
+                socket.send(JSON.stringify(payload));
+                state.ws.messagesSent++;
+            }
+            state.ws.messagesQueued = 0;
+            updateWsDisplay();
+        };
+
+        return {
+            connect,
+            disconnect,
+            /**
+             * Send current location data.
+             * @param {number} lat - Latitude
+             * @param {number} lng - Longitude
+             * @param {number} round - Current round number
+             */
+            sendLocation: (lat, lng, round) => {
+                return send({
+                    type: 'location',
+                    room: CONFIG.REALTIME_CONFIG.ROOM,
+                    round: round,
+                    lat: lat,
+                    lng: lng,
+                    timestamp: Math.floor(Date.now() / 1000)
+                });
+            },
+            /**
+             * Send custom data payload.
+             * @param {Object} data - Custom object to send
+             */
+            sendCustom: (data) => {
+                return send({
+                    ...data,
+                    type: data.type || 'custom',
+                    room: CONFIG.REALTIME_CONFIG.ROOM,
+                    timestamp: Math.floor(Date.now() / 1000)
+                });
+            },
+            /**
+             * Get current connection status.
+             * @returns {string} Status string
+             */
+            getStatus: () => state.ws.status,
+            updateWsDisplay
+        };
+    })();
+
+    // Export to window
+    window.RealtimeTracker = RealtimeTracker;
+
+
+    // ========================================================================
     // [SECTION 5-B] PATCH MANAGER (PHASE 1 WRAPPER SHELL)
     // ========================================================================
 
@@ -798,7 +1083,7 @@ AUTO PIN MODE:
         },
 
         createHandler(actionKey, cooldownMs, handler) {
-            return function(e) {
+            return function (e) {
                 if (!Throttle.canRun(actionKey, cooldownMs)) return;
                 if (e && e.preventDefault) e.preventDefault();
                 handler.call(this, e);
@@ -1046,7 +1331,7 @@ AUTO PIN MODE:
 
                 if (typeof GM_info.scriptHandler === 'string') {
                     Logger.debug('[Integrity] Handler:', GM_info.scriptHandler,
-                                 '| GM_info keys:', Object.keys(GM_info).join(','));
+                        '| GM_info keys:', Object.keys(GM_info).join(','));
                 }
                 if (GM_info.script) {
                     Logger.debug('[Integrity] GM_info.script keys:', Object.keys(GM_info.script).join(','));
@@ -1174,15 +1459,15 @@ AUTO PIN MODE:
             const timer = setTimeout(() => controller.abort(), timeout);
             fetch(url, { method: 'GET', headers: { 'Accept': 'application/json' }, signal: controller.signal })
                 .then((res) => {
-                clearTimeout(timer);
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                return res.json();
-            })
+                    clearTimeout(timer);
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    return res.json();
+                })
                 .then(resolve)
                 .catch((e) => {
-                clearTimeout(timer);
-                reject(e);
-            });
+                    clearTimeout(timer);
+                    reject(e);
+                });
         });
     }
 
@@ -1346,35 +1631,35 @@ AUTO PIN MODE:
 
             root.innerHTML =
                 '<div style="width:min(580px,100%); background:linear-gradient(180deg, #0f1424 0%, #090d1a 100%); border:1px solid rgba(59, 130, 246, 0.2); border-radius:24px; box-shadow:0 30px 100px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.05); padding:32px; color:#f1f5f9; font-family:system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif; animation:btpScaleIn .4s cubic-bezier(0.16, 1, 0.3, 1); box-sizing:border-box;">' +
-                    '<div style="display:flex; align-items:flex-start; gap:16px; margin-bottom:24px;">' +
-                        '<div style="width:44px; height:44px; border-radius:14px; background:linear-gradient(135deg, #ef4444 0%, #b91c1c 100%); display:flex; align-items:center; justify-content:center; font-weight:800; color:#fff; font-size:20px; box-shadow:0 0 20px rgba(239, 68, 68, 0.3); flex-shrink:0;">' +
-                            '<svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>' +
-                        '</div>' +
-                        '<div style="flex:1;">' +
-                            '<div style="font-size:20px; font-weight:700; letter-spacing:-0.2px; color:#ffffff; margin-bottom:4px;">Bintang Toba Pro Integrity</div>' +
-                            '<div id="btp-protection-subtitle" style="font-size:13px; font-weight:500; color:#3b82f6; text-transform:uppercase; letter-spacing:0.5px;"></div>' +
-                        '</div>' +
-                    '</div>' +
-                    '<div id="btp-protection-reason" style="font-size:14px; line-height:1.6; color:#94a3b8; background:rgba(30, 41, 59, 0.3); border:1px solid rgba(255,255,255,0.03); padding:16px; border-radius:14px; margin-bottom:24px;"></div>' +
-                    '<div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:28px;">' +
-                        '<div style="background:rgba(15, 23, 42, 0.4); border:1px solid rgba(255, 255, 255, 0.04); border-radius:14px; padding:14px 16px;">' +
-                            '<div style="font-size:12px; color:#64748b; font-weight:500; margin-bottom:4px;">Current Version</div>' +
-                            '<div id="btp-protection-current" style="font-size:15px; font-weight:600; color:#f8fafc; font-family:monospace;"></div>' +
-                        '</div>' +
-                        '<div style="background:rgba(15, 23, 42, 0.4); border:1px solid rgba(255, 255, 255, 0.04); border-radius:14px; padding:14px 16px;">' +
-                            '<div style="font-size:12px; color:#64748b; font-weight:500; margin-bottom:4px;">Latest Official</div>' +
-                            '<div id="btp-protection-latest" style="font-size:15px; font-weight:600; color:#10b981; font-family:monospace;"></div>' +
-                        '</div>' +
-                        '<div style="background:rgba(15, 23, 42, 0.4); border:1px solid rgba(255, 255, 255, 0.04); border-radius:14px; padding:16px; grid-column:span 2;">' +
-                            '<div style="font-size:12px; color:#64748b; font-weight:500; margin-bottom:4px;">Integrity Status</div>' +
-                            '<div id="btp-protection-integrity" style="font-size:15px; font-weight:600; color:#f43f5e; margin-bottom:6px;"></div>' +
-                            '<div id="btp-protection-message" style="font-size:13px; color:#94a3b8; line-height:1.4;"></div>' +
-                        '</div>' +
-                    '</div>' +
-                    '<div style="display:flex; gap:12px; flex-wrap:wrap;">' +
-                        '<button id="btp-protection-update" class="btp-btn-primary">Update Official Build</button>' +
-                        '<button id="btp-protection-github" class="btp-btn-secondary">Open GitHub Source</button>' +
-                    '</div>' +
+                '<div style="display:flex; align-items:flex-start; gap:16px; margin-bottom:24px;">' +
+                '<div style="width:44px; height:44px; border-radius:14px; background:linear-gradient(135deg, #ef4444 0%, #b91c1c 100%); display:flex; align-items:center; justify-content:center; font-weight:800; color:#fff; font-size:20px; box-shadow:0 0 20px rgba(239, 68, 68, 0.3); flex-shrink:0;">' +
+                '<svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>' +
+                '</div>' +
+                '<div style="flex:1;">' +
+                '<div style="font-size:20px; font-weight:700; letter-spacing:-0.2px; color:#ffffff; margin-bottom:4px;">Bintang Toba Pro Integrity</div>' +
+                '<div id="btp-protection-subtitle" style="font-size:13px; font-weight:500; color:#3b82f6; text-transform:uppercase; letter-spacing:0.5px;"></div>' +
+                '</div>' +
+                '</div>' +
+                '<div id="btp-protection-reason" style="font-size:14px; line-height:1.6; color:#94a3b8; background:rgba(30, 41, 59, 0.3); border:1px solid rgba(255,255,255,0.03); padding:16px; border-radius:14px; margin-bottom:24px;"></div>' +
+                '<div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:28px;">' +
+                '<div style="background:rgba(15, 23, 42, 0.4); border:1px solid rgba(255, 255, 255, 0.04); border-radius:14px; padding:14px 16px;">' +
+                '<div style="font-size:12px; color:#64748b; font-weight:500; margin-bottom:4px;">Current Version</div>' +
+                '<div id="btp-protection-current" style="font-size:15px; font-weight:600; color:#f8fafc; font-family:monospace;"></div>' +
+                '</div>' +
+                '<div style="background:rgba(15, 23, 42, 0.4); border:1px solid rgba(255, 255, 255, 0.04); border-radius:14px; padding:14px 16px;">' +
+                '<div style="font-size:12px; color:#64748b; font-weight:500; margin-bottom:4px;">Latest Official</div>' +
+                '<div id="btp-protection-latest" style="font-size:15px; font-weight:600; color:#10b981; font-family:monospace;"></div>' +
+                '</div>' +
+                '<div style="background:rgba(15, 23, 42, 0.4); border:1px solid rgba(255, 255, 255, 0.04); border-radius:14px; padding:16px; grid-column:span 2;">' +
+                '<div style="font-size:12px; color:#64748b; font-weight:500; margin-bottom:4px;">Integrity Status</div>' +
+                '<div id="btp-protection-integrity" style="font-size:15px; font-weight:600; color:#f43f5e; margin-bottom:6px;"></div>' +
+                '<div id="btp-protection-message" style="font-size:13px; color:#94a3b8; line-height:1.4;"></div>' +
+                '</div>' +
+                '</div>' +
+                '<div style="display:flex; gap:12px; flex-wrap:wrap;">' +
+                '<button id="btp-protection-update" class="btp-btn-primary">Update Official Build</button>' +
+                '<button id="btp-protection-github" class="btp-btn-secondary">Open GitHub Source</button>' +
+                '</div>' +
                 '</div>';
 
             document.body.appendChild(root);
@@ -1425,10 +1710,10 @@ AUTO PIN MODE:
 
         const p = state.runtime.protection;
         Logger.debug('[Integrity] applyProtectionState:',
-                     'blocked=' + p.blocked,
-                     'modified=' + p.modifiedBuild,
-                     'outdated=' + p.outdated,
-                     'forceUpdate=' + p.forceUpdate);
+            'blocked=' + p.blocked,
+            'modified=' + p.modifiedBuild,
+            'outdated=' + p.outdated,
+            'forceUpdate=' + p.forceUpdate);
 
         if (p.modifiedBuild) {
             state.runtime.degraded = true;
@@ -1468,8 +1753,8 @@ AUTO PIN MODE:
                 latestVersion: p.latestVersion,
                 message: p.message,
                 integrityStatus: p.modifiedBuild
-                ? 'MODIFIED BUILD DETECTED'
-                : (p.outdated ? 'OUTDATED BUILD DETECTED' : 'INTEGRITY WARNING')
+                    ? 'MODIFIED BUILD DETECTED'
+                    : (p.outdated ? 'OUTDATED BUILD DETECTED' : 'INTEGRITY WARNING')
             });
         } else {
             hideProtectionOverlay();
@@ -1492,8 +1777,8 @@ AUTO PIN MODE:
             latestVersion: state.runtime?.protection?.latestVersion || CONFIG.VERSION,
             message: state.runtime?.protection?.message || 'Please install the official build.',
             integrityStatus: state.runtime?.protection?.forceUpdate
-            ? 'FORCED UPDATE REQUIRED'
-            : 'PROTECTED MODE ACTIVE'
+                ? 'FORCED UPDATE REQUIRED'
+                : 'PROTECTED MODE ACTIVE'
         });
         return false;
     }
@@ -1537,7 +1822,7 @@ AUTO PIN MODE:
                 if (localSource) {
                     localHash = await generateScriptHash(localSource);
                     Logger.debug('[Integrity] Local hash generated:', localHash ? localHash.substring(0, 16) + '...' : 'FAILED',
-                                 '| source length:', localSource.length);
+                        '| source length:', localSource.length);
                     if (localHash) {
                         safeGM_setValue(CONFIG.STORAGE_KEYS.INTEGRITY_CACHE, {
                             checkedAt: Date.now(),
@@ -1564,9 +1849,9 @@ AUTO PIN MODE:
                 }
 
                 Logger.debug('[Integrity] Remote manifest loaded:',
-                             'version=' + (remote.version || '?'),
-                             '| hash=' + (remote.hash ? remote.hash.substring(0, 16) + '...' : 'EMPTY'),
-                             '| force=' + remote.force);
+                    'version=' + (remote.version || '?'),
+                    '| hash=' + (remote.hash ? remote.hash.substring(0, 16) + '...' : 'EMPTY'),
+                    '| force=' + remote.force);
 
                 const latestVersion = remote.version || CONFIG.VERSION;
                 const versionCmp = compareSemanticVersion(latestVersion, CONFIG.VERSION);
@@ -1574,7 +1859,7 @@ AUTO PIN MODE:
                 const forceUpdate = !!remote.force;
 
                 Logger.debug('[Integrity] Version compare: local=' + CONFIG.VERSION,
-                             'remote=' + latestVersion, 'outdated=' + outdated, 'forceUpdate=' + forceUpdate);
+                    'remote=' + latestVersion, 'outdated=' + outdated, 'forceUpdate=' + forceUpdate);
 
                 let hashMismatch = false;
                 const remoteHashPresent = !!(remote.hash && remote.hash.length > 8);
@@ -1583,31 +1868,31 @@ AUTO PIN MODE:
                 if (localHashPresent && remoteHashPresent) {
                     hashMismatch = String(localHash).toLowerCase() !== String(remote.hash).toLowerCase();
                     Logger.info('[Integrity] Hash comparison:',
-                                hashMismatch ? '❌ MISMATCH' : '✅ MATCH',
-                                '| local=' + localHash.substring(0, 16) + '...',
-                                '| remote=' + remote.hash.substring(0, 16) + '...');
+                        hashMismatch ? '❌ MISMATCH' : '✅ MATCH',
+                        '| local=' + localHash.substring(0, 16) + '...',
+                        '| remote=' + remote.hash.substring(0, 16) + '...');
                     if (hashMismatch) telemetryInc('protection.hashMismatch');
                 } else {
                     Logger.debug('[Integrity] Hash comparison skipped:',
-                                 'localPresent=' + localHashPresent,
-                                 'remotePresent=' + remoteHashPresent);
+                        'localPresent=' + localHashPresent,
+                        'remotePresent=' + remoteHashPresent);
                 }
 
                 const modifiedBuild = runtimeIssues.length > 0 || hashMismatch;
                 const blocked = forceUpdate || modifiedBuild;
 
                 const reasonText = modifiedBuild
-                ? (runtimeIssues[0] || 'Runtime hash mismatch with official build.')
-                : (forceUpdate
-                   ? 'Official build requires mandatory update.'
-                   : (outdated ? 'A newer official version is available.' : null));
+                    ? (runtimeIssues[0] || 'Runtime hash mismatch with official build.')
+                    : (forceUpdate
+                        ? 'Official build requires mandatory update.'
+                        : (outdated ? 'A newer official version is available.' : null));
 
                 Logger.info('[Integrity] ── VERDICT ──',
-                            'blocked=' + blocked,
-                            '| modified=' + modifiedBuild,
-                            '| outdated=' + outdated,
-                            '| forceUpdate=' + forceUpdate,
-                            '| reason=' + (reasonText || 'NONE'));
+                    'blocked=' + blocked,
+                    '| modified=' + modifiedBuild,
+                    '| outdated=' + outdated,
+                    '| forceUpdate=' + forceUpdate,
+                    '| reason=' + (reasonText || 'NONE'));
 
                 applyProtectionState({
                     blocked,
@@ -2030,7 +2315,7 @@ AUTO PIN MODE:
         jitterRange.value = String(state.jitterDistance);
 
         const unitLabel = state.jitterUnit === 'km' ? 'km' : 'm';
-        jitterLabel.textContent = `Batas Acak: 0 - ${Number(state.jitterDistance).toLocaleString('en-US')} ${unitLabel}`;
+        jitterLabel.textContent = `Random Limits: 0 - ${Number(state.jitterDistance).toLocaleString('en-US')} ${unitLabel}`;
 
         if (jitterBox) {
             const enabled = !!state.features?.safeMode;
@@ -2047,7 +2332,7 @@ AUTO PIN MODE:
 
     function setMapLayerButtonsUi(container) {
         const wrap = container || document.getElementById('geohelper-maps-view') ||
-              document.getElementById('geohelper-phone-frame') || state.panel;
+            document.getElementById('geohelper-phone-frame') || state.panel;
         if (!wrap) return;
 
         const darkMode = true;
@@ -2139,9 +2424,9 @@ AUTO PIN MODE:
                         const sv = walkFiber(el[fiberKey], 0);
                         if (sv?.location?.latLng) {
                             const lat = typeof sv.location.latLng.lat === 'function'
-                            ? sv.location.latLng.lat() : sv.location.latLng.lat;
+                                ? sv.location.latLng.lat() : sv.location.latLng.lat;
                             const lng = typeof sv.location.latLng.lng === 'function'
-                            ? sv.location.latLng.lng() : sv.location.latLng.lng;
+                                ? sv.location.latLng.lng() : sv.location.latLng.lng;
                             if (Validators.isValidCoord(lat, lng)) return { lat, lng };
                         }
                     }
@@ -2279,8 +2564,8 @@ AUTO PIN MODE:
             setTimeout(() => {
                 for (const strategy of this._strategies) {
                     const started = (typeof performance !== 'undefined' && performance.now)
-                    ? performance.now()
-                    : Date.now();
+                        ? performance.now()
+                        : Date.now();
 
                     let result = null;
                     try {
@@ -2290,8 +2575,8 @@ AUTO PIN MODE:
                     }
 
                     const ended = (typeof performance !== 'undefined' && performance.now)
-                    ? performance.now()
-                    : Date.now();
+                        ? performance.now()
+                        : Date.now();
                     const ms = Math.max(0, ended - started);
                     const ok = !!(result && Validators.isValidCoord(result.lat, result.lng));
 
@@ -2364,9 +2649,9 @@ AUTO PIN MODE:
                         for (const sv of paths) {
                             if (sv?.location?.latLng) {
                                 const lat = typeof sv.location.latLng.lat === 'function'
-                                ? sv.location.latLng.lat() : sv.location.latLng.lat;
+                                    ? sv.location.latLng.lat() : sv.location.latLng.lat;
                                 const lng = typeof sv.location.latLng.lng === 'function'
-                                ? sv.location.latLng.lng() : sv.location.latLng.lng;
+                                    ? sv.location.latLng.lng() : sv.location.latLng.lng;
                                 if (Validators.isValidCoord(lat, lng)) {
                                     const r = { lat, lng };
                                     extractionCache.set(r, 'fiber-path');
@@ -2378,9 +2663,9 @@ AUTO PIN MODE:
                         const sv = walkFiber(fiber, 0);
                         if (sv?.location?.latLng) {
                             const lat = typeof sv.location.latLng.lat === 'function'
-                            ? sv.location.latLng.lat() : sv.location.latLng.lat;
+                                ? sv.location.latLng.lat() : sv.location.latLng.lat;
                             const lng = typeof sv.location.latLng.lng === 'function'
-                            ? sv.location.latLng.lng() : sv.location.latLng.lng;
+                                ? sv.location.latLng.lng() : sv.location.latLng.lng;
                             if (Validators.isValidCoord(lat, lng)) {
                                 const r = { lat, lng };
                                 extractionCache.set(r, 'fiber-walk');
@@ -2420,8 +2705,8 @@ AUTO PIN MODE:
                 const fiber = el[fiberKey];
 
                 const latLong = fiber.return?.memoizedProps?.latLong
-                || fiber.return?.return?.memoizedProps?.latLong
-                || fiber.memoizedProps?.latLong;
+                    || fiber.return?.return?.memoizedProps?.latLong
+                    || fiber.memoizedProps?.latLong;
 
                 if (Array.isArray(latLong) && latLong.length === 2) {
                     const [lat, lng] = latLong;
@@ -2433,7 +2718,7 @@ AUTO PIN MODE:
                 }
 
                 const coordinates = fiber.return?.memoizedProps?.coordinates
-                || fiber.return?.return?.memoizedProps?.coordinates;
+                    || fiber.return?.return?.memoizedProps?.coordinates;
 
                 if (coordinates) {
                     const lat = coordinates.lat || coordinates.latitude;
@@ -2538,8 +2823,8 @@ AUTO PIN MODE:
 
         const now = Date.now();
         const minInterval = state.platform === 'geoguessr'
-        ? CONFIG.TIMING.ADDRESS_RATE_LIMIT_GEOGUESSR
-        : CONFIG.TIMING.ADDRESS_RATE_LIMIT_DEFAULT;
+            ? CONFIG.TIMING.ADDRESS_RATE_LIMIT_GEOGUESSR
+            : CONFIG.TIMING.ADDRESS_RATE_LIMIT_DEFAULT;
         const effectiveInterval = Math.max(minInterval, addressBackoffMs);
         const elapsed = now - lastAddressCall;
 
@@ -2611,15 +2896,15 @@ AUTO PIN MODE:
                     signal: controller.signal
                 })
                     .then(res => {
-                    clearTimeout(timeoutId);
-                    if (res.ok) return res.json();
-                    throw { message: `HTTP ${res.status}`, status: res.status };
-                })
+                        clearTimeout(timeoutId);
+                        if (res.ok) return res.json();
+                        throw { message: `HTTP ${res.status}`, status: res.status };
+                    })
                     .then(handleResponse)
                     .catch((e) => {
-                    clearTimeout(timeoutId);
-                    handleError(e, e?.status || 0);
-                });
+                        clearTimeout(timeoutId);
+                        handleError(e, e?.status || 0);
+                    });
             }
         } else {
             setTimeout(processAddressQueue, effectiveInterval - elapsed);
@@ -2676,7 +2961,7 @@ AUTO PIN MODE:
         const lastEntry = state.roundHistory[0] || null;
         if (lastEntry) {
             const veryClose = Math.abs(lastEntry.lat - coords.lat) < 0.00001 &&
-                  Math.abs(lastEntry.lng - coords.lng) < 0.00001;
+                Math.abs(lastEntry.lng - coords.lng) < 0.00001;
             if (veryClose) return;
         }
 
@@ -2699,27 +2984,27 @@ AUTO PIN MODE:
         if (!Array.isArray(rawRounds)) return [];
 
         const cleaned = rawRounds
-        .map((item, idx) => {
-            const lat = Number(item?.lat);
-            const lng = Number(item?.lng);
-            if (!Validators.isValidCoord(lat, lng)) return null;
+            .map((item, idx) => {
+                const lat = Number(item?.lat);
+                const lng = Number(item?.lng);
+                if (!Validators.isValidCoord(lat, lng)) return null;
 
-            const tsRaw = item?.timestamp;
-            const ts = Number.isFinite(Number(tsRaw))
-            ? Number(tsRaw)
-            : Date.now() - ((rawRounds.length - idx) * 1000);
+                const tsRaw = item?.timestamp;
+                const ts = Number.isFinite(Number(tsRaw))
+                    ? Number(tsRaw)
+                    : Date.now() - ((rawRounds.length - idx) * 1000);
 
-            return {
-                round: Number.isFinite(Number(item?.round)) ? Number(item.round) : idx + 1,
-                lat,
-                lng,
-                address: String(item?.address || 'Unknown location'),
-                timestamp: ts
-            };
-        })
-        .filter(Boolean)
-        .sort((a, b) => b.timestamp - a.timestamp)
-        .slice(0, CONFIG.LIMITS.HISTORY_MAX_ITEMS);
+                return {
+                    round: Number.isFinite(Number(item?.round)) ? Number(item.round) : idx + 1,
+                    lat,
+                    lng,
+                    address: String(item?.address || 'Unknown location'),
+                    timestamp: ts
+                };
+            })
+            .filter(Boolean)
+            .sort((a, b) => b.timestamp - a.timestamp)
+            .slice(0, CONFIG.LIMITS.HISTORY_MAX_ITEMS);
 
         return normalizeRoundSequence(cleaned);
     }
@@ -2799,11 +3084,11 @@ AUTO PIN MODE:
 
         return '<div style="margin-top:12px;">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">' +
-                '<div style="font-size:12px;color:#6b7280;font-weight:700;text-transform:uppercase;letter-spacing:.5px;">Round History</div>' +
-                buildRoundHistoryHeaderActionsHtml() +
+            '<div style="font-size:12px;color:#6b7280;font-weight:700;text-transform:uppercase;letter-spacing:.5px;">Round History</div>' +
+            buildRoundHistoryHeaderActionsHtml() +
             '</div>' +
             '<div>' + rows + '</div>' +
-        '</div>';
+            '</div>';
     }
 
     // ========================================================================
@@ -3003,7 +3288,7 @@ AUTO PIN MODE:
             'copy-all': Throttle.createHandler('history_copy_all', CONFIG.COOLDOWNS.HISTORY_EXPORT, () => {
                 if (!state.roundHistory.length) return;
                 const text = state.roundHistory.map((e) =>
-                                                    `Round ${e.round}: ${e.lat.toFixed(6)}, ${e.lng.toFixed(6)} | ${e.address}`
+                    `Round ${e.round}: ${e.lat.toFixed(6)}, ${e.lng.toFixed(6)} | ${e.address}`
                 ).join('\n');
                 navigator.clipboard.writeText(text).then(() => {
                     const btn = container.querySelector('[data-history-action="copy-all"]');
@@ -3166,7 +3451,7 @@ AUTO PIN MODE:
             fallback = candidate; // Always track latest valid random candidate
 
             Logger.debug('🎲 Jitter attempt', attempt + 1, ':', candidate.lat.toFixed(4), candidate.lng.toFixed(4),
-                         '| dist:', Math.round(distanceMeters / 1000) + 'km');
+                '| dist:', Math.round(distanceMeters / 1000) + 'km');
 
             // Try to snap to nearest StreetView (guarantees land placement)
             const snapped = await getNearestStreetView(candidate, svSearchRadius);
@@ -3174,7 +3459,7 @@ AUTO PIN MODE:
                 updateStatusText('Ready', '#4ade80');
                 updateLedIndicator('ready');
                 Logger.info('🎯 Safe land coordinate found (attempt ' + (attempt + 1) + '):',
-                            snapped.lat.toFixed(6), snapped.lng.toFixed(6));
+                    snapped.lat.toFixed(6), snapped.lng.toFixed(6));
                 return snapped;
             }
         }
@@ -3316,8 +3601,8 @@ AUTO PIN MODE:
         if (!domNode) return null;
 
         const fiberKey = Object.keys(domNode).find(k =>
-                                                   k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$')
-                                                  );
+            k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$')
+        );
         if (!fiberKey) return null;
 
         let fiber = domNode[fiberKey];
@@ -3476,10 +3761,10 @@ AUTO PIN MODE:
 
         if (withJitter) {
             Logger.info('🎲 Safe jitter config:',
-                        Number(state.jitterDistance),
-                        state.jitterUnit,
-                        '| from:', raw.lat.toFixed(6), raw.lng.toFixed(6),
-                        '| to:', target.lat.toFixed(6), target.lng.toFixed(6));
+                Number(state.jitterDistance),
+                state.jitterUnit,
+                '| from:', raw.lat.toFixed(6), raw.lng.toFixed(6),
+                '| to:', target.lat.toFixed(6), target.lng.toFixed(6));
         }
 
         const ok = pinGuessToGameMap(target.lat, target.lng);
@@ -3489,8 +3774,8 @@ AUTO PIN MODE:
             updateStatusText(withJitter ? 'Safe Pinned!' : 'Pinned!', '#4ade80');
             updateLedIndicator('ready');
             Logger.info('📌 Guess pinned on game map',
-                        withJitter ? '(jittered)' : '(exact)',
-                        target.lat.toFixed(6), target.lng.toFixed(6));
+                withJitter ? '(jittered)' : '(exact)',
+                target.lat.toFixed(6), target.lng.toFixed(6));
         } else {
             updateStatusText('Pin failed', '#ef4444');
             Logger.warn('placeGuessOnMap: could not pin guess');
@@ -3728,8 +4013,8 @@ AUTO PIN MODE:
 
         const requestId = ++refreshRequestId;
         const refreshToken = state.runtime?.flags?.USE_REQUEST_TOKENING
-        ? RequestTokens.issue('refresh_flow')
-        : 0;
+            ? RequestTokens.issue('refresh_flow')
+            : 0;
         if (state.runtime?.flags?.USE_REQUEST_TOKENING) {
             telemetryInc('async.refreshIssued');
         }
@@ -4175,7 +4460,7 @@ AUTO PIN MODE:
 
                         if (monitoringLastValidCoords) {
                             const distance = Math.abs(coords.lat - monitoringLastValidCoords.lat) +
-                                  Math.abs(coords.lng - monitoringLastValidCoords.lng);
+                                Math.abs(coords.lng - monitoringLastValidCoords.lng);
                             if (distance > CONFIG.MAP.NEW_ROUND_THRESHOLD) {
                                 isNewRound = true;
                                 Logger.info('New round detected');
@@ -4202,6 +4487,14 @@ AUTO PIN MODE:
                             addRoundHistoryEntry(coords, state.address);
                         }
                         monitoringLastValidCoords = { lat: coords.lat, lng: coords.lng };
+
+                        try {
+                            if (typeof RealtimeTracker !== 'undefined') {
+                                RealtimeTracker.sendLocation(coords.lat, coords.lng, state.roundHistory[0]?.round || 1);
+                            }
+                        } catch (e) {
+                            Logger.debug('WS send failed:', e?.message);
+                        }
 
                         try {
                             if (state.runtime?.flags?.USE_REQUEST_TOKENING) {
@@ -4641,7 +4934,7 @@ AUTO PIN MODE:
 
         const updateLabel = () => {
             const unitLabel = state.jitterUnit === 'km' ? 'km' : 'm';
-            jitterLabel.textContent = `Batas Acak: 0 - ${Number(state.jitterDistance).toLocaleString('en-US')} ${unitLabel}`;
+            jitterLabel.textContent = `Random Limits: 0 - ${Number(state.jitterDistance).toLocaleString('en-US')} ${unitLabel}`;
         };
 
         const persistJitterSettings = () => {
@@ -4775,7 +5068,16 @@ AUTO PIN MODE:
         bindSessionControls(phoneFrame);
     }
 
-    const PHONE_APP_VIEWS = Object.freeze(['settings', 'hotkeys', 'discord', 'copyApp', 'mapsApp', 'historyApp']);
+    function wirePhoneRealtime(phoneFrame) {
+        if (!phoneFrame) return;
+        document.getElementById('ws-connect-btn')?.addEventListener('click', () => RealtimeTracker.connect());
+        document.getElementById('ws-disconnect-btn')?.addEventListener('click', () => RealtimeTracker.disconnect());
+        document.getElementById('ws-open-map-btn')?.addEventListener('click', () => {
+            window.open(CONFIG.REALTIME_CONFIG.MAP_URL, '_blank');
+        });
+    }
+
+    const PHONE_APP_VIEWS = Object.freeze(['settings', 'hotkeys', 'discord', 'copyApp', 'mapsApp', 'historyApp', 'realtimeApp']);
     const PHONE_VIEW_OFFSETS = Object.freeze({
         map: 0,
         menu: -100,
@@ -4784,7 +5086,8 @@ AUTO PIN MODE:
         discord: -400,
         copyApp: -500,
         mapsApp: -600,
-        historyApp: -700
+        historyApp: -700,
+        realtimeApp: -800
     });
 
     function isPhoneAppView(view) {
@@ -4814,6 +5117,7 @@ AUTO PIN MODE:
         document.getElementById('geohelper-app-settings')?.addEventListener('click', (e) => { e.stopPropagation(); swapToView('settings'); });
         document.getElementById('geohelper-app-hotkeys')?.addEventListener('click', (e) => { e.stopPropagation(); swapToView('hotkeys'); });
         document.getElementById('geohelper-app-discord')?.addEventListener('click', (e) => { e.stopPropagation(); swapToView('discord'); });
+        document.getElementById('geohelper-app-websocket')?.addEventListener('click', (e) => { e.stopPropagation(); swapToView('realtimeApp'); });
         document.getElementById('geohelper-app-history')?.addEventListener('click', (e) => { e.stopPropagation(); swapToView('historyApp'); });
         document.getElementById('geohelper-copy-btn')?.addEventListener('click', (e) => { e.stopPropagation(); swapToView('copyApp'); });
         document.getElementById('geohelper-maps-btn')?.addEventListener('click', (e) => { e.stopPropagation(); swapToView('mapsApp'); });
@@ -5043,26 +5347,27 @@ AUTO PIN MODE:
         return '<div style="display:flex;align-items:center;gap:8px;">' +
             '<div id="geohelper-led-indicator" style="width:6px;height:6px;border-radius:50%;background:#4ade80;box-shadow:0 0 6px #4ade80;transition:all 0.3s;"></div>' +
             '<span id="geohelper-clock">12:00</span>' +
-        '</div>' +
-        '<div style="display:flex;align-items:center;gap:10px;">' +
+            '</div>' +
+            '<div style="display:flex;align-items:center;gap:10px;">' +
             '<span style="font-size:10px;font-weight:700;color:#9ca3af;letter-spacing:0.3px;">' + Security.escapeHtml(CONFIG.NAME) + '</span>' +
             '<div style="display:flex;gap:6px;align-items:center;">' +
-                '<span>📶</span>' +
-                '<span>📳</span>' +
-                '<span>🔋</span>' +
+            '<span>🌏</span>' +
+            '<span>💌</span>' +
+            '<span>📶</span>' +
+            '<span>🔋</span>' +
             '</div>' +
-        '</div>';
+            '</div>';
     }
 
     function buildMiniMapSectionHtml() {
         return '<div id="geohelper-minimap" style="width:100%;height:100%;background:#cbd5e1;"></div>' +
             '<div id="geohelper-status-badge" style="position:absolute;top:12px;left:12px;background:rgba(74,222,128,0.95);padding:4px 10px;border-radius:6px;font-size:11px;color:#064e3b;font-weight:800;cursor:pointer;z-index:1000;">✓ Ready</div>' +
             '<div style="position:absolute;top:12px;right:12px;display:flex;flex-direction:column;gap:4px;z-index:1000;">' +
-                '<div style="display:flex;flex-direction:column;gap:1px;box-shadow:0 2px 8px rgba(0,0,0,0.15);border-radius:18px;overflow:hidden;">' +
-                    '<button id="geohelper-zoom-in" style="width:36px;height:36px;background:#fff;border:none;color:#374151;cursor:pointer;font-size:18px;font-weight:bold;">+</button>' +
-                    '<button id="geohelper-zoom-out" style="width:36px;height:36px;background:#fff;border:none;color:#374151;cursor:pointer;font-size:18px;font-weight:bold;">−</button>' +
-                '</div>' +
-                '<div id="geohelper-zoom-level" style="background:rgba(255,255,255,0.9);padding:2px 8px;border-radius:10px;font-size:10px;font-weight:800;color:#1f2937;text-align:center;">x2</div>' +
+            '<div style="display:flex;flex-direction:column;gap:1px;box-shadow:0 2px 8px rgba(0,0,0,0.15);border-radius:18px;overflow:hidden;">' +
+            '<button id="geohelper-zoom-in" style="width:36px;height:36px;background:#fff;border:none;color:#374151;cursor:pointer;font-size:18px;font-weight:bold;">+</button>' +
+            '<button id="geohelper-zoom-out" style="width:36px;height:36px;background:#fff;border:none;color:#374151;cursor:pointer;font-size:18px;font-weight:bold;">−</button>' +
+            '</div>' +
+            '<div id="geohelper-zoom-level" style="background:rgba(255,255,255,0.9);padding:2px 8px;border-radius:10px;font-size:10px;font-weight:800;color:#1f2937;text-align:center;">x2</div>' +
             '</div>' +
             '<div id="geohelper-coords-overlay" style="position:absolute;bottom:12px;left:12px;background:rgba(255,255,255,0.9);padding:4px 10px;border-radius:6px;font-family:monospace;font-size:11px;color:#1f2937;font-weight:700;z-index:1000;">--, --</div>';
     }
@@ -5071,95 +5376,95 @@ AUTO PIN MODE:
         return '<div style="text-align:center;padding:20px 10px;">' +
             '<div style="font-size:32px;margin-bottom:8px;">🌍</div>' +
             '<div style="color:#d1d5db;font-size:13px;font-weight:500;">Waiting for location...</div>' +
-        '</div>';
+            '</div>';
     }
 
     function buildAppButtonHtml(app) {
         return '<div class="geohelper-app-icon" data-bg="' + Security.escapeAttr(app.bg) + '" style="width:56px;height:56px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:25px;background:' + app.bg + ';">' +
             app.icon +
-        '</div>' +
-        '<span class="geohelper-app-label" style="font-size:10px;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,0.3);">' + Security.escapeHtml(app.label) + '</span>';
+            '</div>' +
+            '<span class="geohelper-app-label" style="font-size:10px;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,0.3);">' + Security.escapeHtml(app.label) + '</span>';
     }
 
     function buildSettingsViewHtml() {
         return '<div style="background:#fff;padding:16px 20px;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;gap:12px;">' +
             '<h2 style="margin:0;font-size:18px;font-weight:700;color:#111827;">Settings</h2>' +
-        '</div>' +
-        '<div style="flex:1;overflow-y:auto;padding:16px;">' +
+            '</div>' +
+            '<div style="flex:1;overflow-y:auto;padding:16px;">' +
             '<div style="background:#fff;border-radius:16px;padding:16px;margin-bottom:16px;">' +
-                '<div style="font-size:12px;color:#6b7280;font-weight:700;margin-bottom:14px;">🔴 SETTING MARKER</div>' +
-                '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">' +
-                    '<div><div style="font-weight:600;font-size:14px;">Auto Marker</div><div style="font-size:11px;color:#6b7280;">Off: Manual Marker, On: Auto Marker per round</div></div>' +
-                    '<label style="position:relative;display:inline-block;width:22px;height:22px;">' +
-                        '<input type="checkbox" id="geohelper-auto-marker"' + (state.features?.autoMarker ? ' checked' : '') + ' style="opacity:0;width:0;height:0;">' +
-                        '<span id="geohelper-auto-marker-slider" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#2b313b;border:2px solid #465062;transition:.2s;border-radius:50%;"></span>' +
-                        '<span id="geohelper-auto-marker-dot" style="position:absolute;height:10px;width:10px;left:50%;top:50%;transform:translate(-50%,-50%);background-color:#f8fafc;transition:.2s;border-radius:50%;opacity:0;"></span>' +
-                    '</label>' +
-                '</div>' +
-                '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">' +
-                    '<div><div style="font-weight:600;font-size:14px;">Auto Pin</div><div style="font-size:11px;color:#6b7280;">Off: place marker, On: pin guess on game map</div></div>' +
-                    '<label style="position:relative;display:inline-block;width:22px;height:22px;">' +
-                        '<input type="checkbox" id="geohelper-auto-pin"' + (state.features?.autoPin ? ' checked' : '') + ' style="opacity:0;width:0;height:0;">' +
-                        '<span id="geohelper-auto-pin-slider" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#2b313b;border:2px solid #465062;transition:.2s;border-radius:50%;"></span>' +
-                        '<span id="geohelper-auto-pin-dot" style="position:absolute;height:10px;width:10px;left:50%;top:50%;transform:translate(-50%,-50%);background-color:#f8fafc;transition:.2s;border-radius:50%;opacity:0;"></span>' +
-                    '</label>' +
-                '</div>' +
-                '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
-                    '<div><div style="font-weight:600;font-size:14px;">Safe Mode</div><div style="font-size:11px;color:#6b7280;">Bounded random jitter anti-water</div></div>' +
-                    '<label style="position:relative;display:inline-block;width:22px;height:22px;">' +
-                        '<input type="checkbox" id="geohelper-safe-mode"' + (state.features?.safeMode ? ' checked' : '') + ' style="opacity:0;width:0;height:0;">' +
-                        '<span id="geohelper-safe-mode-slider" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#2b313b;border:2px solid #465062;transition:.2s;border-radius:50%;"></span>' +
-                        '<span id="geohelper-safe-mode-dot" style="position:absolute;height:10px;width:10px;left:50%;top:50%;transform:translate(-50%,-50%);background-color:#f8fafc;transition:.2s;border-radius:50%;opacity:0;"></span>' +
-                    '</label>' +
-                '</div>' +
-                '<div id="geohelper-jitter-controls-box" style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:12px;padding:12px;margin-top:10px;max-height:140px;overflow:hidden;display:block;">' +
-                    '<div id="geohelper-jitter-label" style="font-size:12px;color:#374151;font-weight:700;margin-bottom:10px;">Batas Acak: 0 - ' + Number(state.jitterDistance || CONFIG.DEFAULTS.JITTER_DISTANCE).toLocaleString('en-US') + ' ' + Security.escapeHtml(state.jitterUnit || CONFIG.DEFAULTS.JITTER_UNIT) + '</div>' +
-                    '<div style="display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;">' +
-                        '<input type="range" id="geohelper-jitter-range" min="0" max="10000" step="' + ((state.jitterUnit || CONFIG.DEFAULTS.JITTER_UNIT) === 'km' ? '5' : '50') + '" value="' + Number(state.jitterDistance || CONFIG.DEFAULTS.JITTER_DISTANCE) + '" style="width:100%;cursor:pointer;accent-color:#1a73e8;">' +
-                        '<select id="geohelper-jitter-unit" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:10px;background:#fff;font-size:12px;font-weight:700;color:#111827;">' +
-                            '<option value="m"' + ((state.jitterUnit || CONFIG.DEFAULTS.JITTER_UNIT) === 'm' ? ' selected' : '') + '>Meter (m)</option>' +
-                            '<option value="km"' + ((state.jitterUnit || CONFIG.DEFAULTS.JITTER_UNIT) === 'km' ? ' selected' : '') + '>Kilometer (km)</option>' +
-                        '</select>' +
-                    '</div>' +
-                '</div>' +
+            '<div style="font-size:12px;color:#6b7280;font-weight:700;margin-bottom:14px;">🔴 SETTING MARKER</div>' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">' +
+            '<div><div style="font-weight:600;font-size:14px;">Auto Marker</div><div style="font-size:11px;color:#6b7280;">Off: Manual Marker, On: Auto Marker per round</div></div>' +
+            '<label style="position:relative;display:inline-block;width:22px;height:22px;">' +
+            '<input type="checkbox" id="geohelper-auto-marker"' + (state.features?.autoMarker ? ' checked' : '') + ' style="opacity:0;width:0;height:0;">' +
+            '<span id="geohelper-auto-marker-slider" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#2b313b;border:2px solid #465062;transition:.2s;border-radius:50%;"></span>' +
+            '<span id="geohelper-auto-marker-dot" style="position:absolute;height:10px;width:10px;left:50%;top:50%;transform:translate(-50%,-50%);background-color:#f8fafc;transition:.2s;border-radius:50%;opacity:0;"></span>' +
+            '</label>' +
+            '</div>' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">' +
+            '<div><div style="font-weight:600;font-size:14px;">Auto Pin</div><div style="font-size:11px;color:#6b7280;">Off: place marker, On: pin guess on game map</div></div>' +
+            '<label style="position:relative;display:inline-block;width:22px;height:22px;">' +
+            '<input type="checkbox" id="geohelper-auto-pin"' + (state.features?.autoPin ? ' checked' : '') + ' style="opacity:0;width:0;height:0;">' +
+            '<span id="geohelper-auto-pin-slider" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#2b313b;border:2px solid #465062;transition:.2s;border-radius:50%;"></span>' +
+            '<span id="geohelper-auto-pin-dot" style="position:absolute;height:10px;width:10px;left:50%;top:50%;transform:translate(-50%,-50%);background-color:#f8fafc;transition:.2s;border-radius:50%;opacity:0;"></span>' +
+            '</label>' +
+            '</div>' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
+            '<div><div style="font-weight:600;font-size:14px;">Safe Mode</div><div style="font-size:11px;color:#6b7280;">Bounded random jitter anti-water</div></div>' +
+            '<label style="position:relative;display:inline-block;width:22px;height:22px;">' +
+            '<input type="checkbox" id="geohelper-safe-mode"' + (state.features?.safeMode ? ' checked' : '') + ' style="opacity:0;width:0;height:0;">' +
+            '<span id="geohelper-safe-mode-slider" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#2b313b;border:2px solid #465062;transition:.2s;border-radius:50%;"></span>' +
+            '<span id="geohelper-safe-mode-dot" style="position:absolute;height:10px;width:10px;left:50%;top:50%;transform:translate(-50%,-50%);background-color:#f8fafc;transition:.2s;border-radius:50%;opacity:0;"></span>' +
+            '</label>' +
+            '</div>' +
+            '<div id="geohelper-jitter-controls-box" style="background:#333333;border:1px solid #e5e7eb;border-radius:12px;padding:12px;margin-top:10px;max-height:140px;overflow:hidden;display:block;">' +
+            '<div id="geohelper-jitter-label" style="font-size:12px;color:#374151;font-weight:700;margin-bottom:10px;">Random Limits: 0 - ' + Number(state.jitterDistance || CONFIG.DEFAULTS.JITTER_DISTANCE).toLocaleString('en-US') + ' ' + Security.escapeHtml(state.jitterUnit || CONFIG.DEFAULTS.JITTER_UNIT) + '</div>' +
+            '<div style="display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;">' +
+            '<input type="range" id="geohelper-jitter-range" min="0" max="10000" step="' + ((state.jitterUnit || CONFIG.DEFAULTS.JITTER_UNIT) === 'km' ? '5' : '50') + '" value="' + Number(state.jitterDistance || CONFIG.DEFAULTS.JITTER_DISTANCE) + '" style="width:100%;cursor:pointer;accent-color:#1a73e8;">' +
+            '<select id="geohelper-jitter-unit" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:10px;background:#333333;font-size:12px;font-weight:700;color:#111827;">' +
+            '<option value="m"' + ((state.jitterUnit || CONFIG.DEFAULTS.JITTER_UNIT) === 'm' ? ' selected' : '') + '>(m)</option>' +
+            '<option value="km"' + ((state.jitterUnit || CONFIG.DEFAULTS.JITTER_UNIT) === 'km' ? ' selected' : '') + '>(km)</option>' +
+            '</select>' +
+            '</div>' +
+            '</div>' +
             '</div>' +
             '<div style="background:#fff;border-radius:16px;padding:16px;margin-bottom:16px;">' +
-                '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
-                    '<div style="font-size:12px;color:#6b7280;font-weight:700;">⚡ Preset Mode</div>' +
-                    '<div id="geohelper-preset-status" style="font-size:10px;color:#4ade80;font-weight:800;">MODE: ' + String(state.currentPreset || '').toUpperCase() + '</div>' +
-                '</div>' +
-                '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">' +
-                    '<button data-preset="exact" style="padding:10px;border-radius:10px;border:2px solid #e5e7eb;background:#fff;cursor:pointer;font-size:12px;font-weight:700;">Exact</button>' +
-                    '<button data-preset="safe" style="padding:10px;border-radius:10px;border:2px solid #e5e7eb;background:#fff;cursor:pointer;font-size:12px;font-weight:700;">Safe</button>' +
-                    '<button data-preset="stealth" style="padding:10px;border-radius:10px;border:2px solid #e5e7eb;background:#fff;cursor:pointer;font-size:12px;font-weight:700;">Stealth</button>' +
-                '</div>' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
+            '<div style="font-size:12px;color:#6b7280;font-weight:700;">⚡ Preset Mode</div>' +
+            '<div id="geohelper-preset-status" style="font-size:10px;color:#4ade80;font-weight:800;">MODE: ' + String(state.currentPreset || '').toUpperCase() + '</div>' +
+            '</div>' +
+            '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">' +
+            '<button data-preset="exact" style="padding:10px;border-radius:10px;border:2px solid #e5e7eb;background:#fff;cursor:pointer;font-size:12px;font-weight:700;">Exact</button>' +
+            '<button data-preset="safe" style="padding:10px;border-radius:10px;border:2px solid #e5e7eb;background:#fff;cursor:pointer;font-size:12px;font-weight:700;">Safe</button>' +
+            '<button data-preset="stealth" style="padding:10px;border-radius:10px;border:2px solid #e5e7eb;background:#fff;cursor:pointer;font-size:12px;font-weight:700;">Stealth</button>' +
+            '</div>' +
             '</div>' +
             '<div style="background:#fff;border-radius:16px;padding:16px;margin-bottom:16px;">' +
-                '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
-                    '<div style="font-size:12px;color:#6b7280;font-weight:700;">📐 UI Scale</div>' +
-                    '<div id="geohelper-scale-status" style="font-size:10px;color:#4ade80;font-weight:800;">SCALE: ' + String(state.uiScale || CONFIG.DEFAULTS.UI_SCALE).toUpperCase() + '</div>' +
-                '</div>' +
-                '<div style="display:flex;justify-content:space-between;align-items:center;">' +
-                    '<div><div style="font-weight:600;font-size:14px;">Mode Compact</div><div style="font-size:11px;color:#6b7280;">Off: Normal, On: Compact</div></div>' +
-                    '<label style="position:relative;display:inline-block;width:22px;height:22px;">' +
-                        '<input type="checkbox" id="geohelper-ui-scale"' + (state.uiScale === 'compact' ? ' checked' : '') + ' style="opacity:0;width:0;height:0;">' +
-                        '<span id="geohelper-ui-scale-slider" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#2b313b;border:2px solid #465062;transition:.2s;border-radius:50%;"></span>' +
-                        '<span id="geohelper-ui-scale-dot" style="position:absolute;height:10px;width:10px;left:50%;top:50%;transform:translate(-50%,-50%);background-color:#f8fafc;transition:.2s;border-radius:50%;opacity:0;"></span>' +
-                    '</label>' +
-                '</div>' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
+            '<div style="font-size:12px;color:#6b7280;font-weight:700;">📐 UI Scale</div>' +
+            '<div id="geohelper-scale-status" style="font-size:10px;color:#4ade80;font-weight:800;">SCALE: ' + String(state.uiScale || CONFIG.DEFAULTS.UI_SCALE).toUpperCase() + '</div>' +
+            '</div>' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;">' +
+            '<div><div style="font-weight:600;font-size:14px;">Mode Compact</div><div style="font-size:11px;color:#6b7280;">Off: Normal, On: Compact</div></div>' +
+            '<label style="position:relative;display:inline-block;width:22px;height:22px;">' +
+            '<input type="checkbox" id="geohelper-ui-scale"' + (state.uiScale === 'compact' ? ' checked' : '') + ' style="opacity:0;width:0;height:0;">' +
+            '<span id="geohelper-ui-scale-slider" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#2b313b;border:2px solid #465062;transition:.2s;border-radius:50%;"></span>' +
+            '<span id="geohelper-ui-scale-dot" style="position:absolute;height:10px;width:10px;left:50%;top:50%;transform:translate(-50%,-50%);background-color:#f8fafc;transition:.2s;border-radius:50%;opacity:0;"></span>' +
+            '</label>' +
+            '</div>' +
             '</div>' +
             '<div style="background:#fff;border-radius:16px;padding:16px;margin-bottom:16px;">' +
-                '<div style="font-size:12px;color:#6b7280;font-weight:700;margin-bottom:12px;">🧰 Session Backup</div>' +
-                '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">' +
-                    '<button id="geohelper-export-session" style="padding:12px;background:#fff;border:2px solid #e5e7eb;border-radius:12px;cursor:pointer;font-size:12px;font-weight:700;">📤 Backup</button>' +
-                    '<button id="geohelper-import-session" style="padding:12px;background:#fff;border:2px solid #e5e7eb;border-radius:12px;cursor:pointer;font-size:12px;font-weight:700;">📥 Restore</button>' +
-                '</div>' +
+            '<div style="font-size:12px;color:#6b7280;font-weight:700;margin-bottom:12px;">🧰 Session Backup</div>' +
+            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">' +
+            '<button id="geohelper-export-session" style="padding:12px;background:#fff;border:2px solid #e5e7eb;border-radius:12px;cursor:pointer;font-size:12px;font-weight:700;">📤 Backup</button>' +
+            '<button id="geohelper-import-session" style="padding:12px;background:#fff;border:2px solid #e5e7eb;border-radius:12px;cursor:pointer;font-size:12px;font-weight:700;">📥 Restore</button>' +
+            '</div>' +
             '</div>' +
             '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:40px;">' +
-                '<button id="geohelper-save" style="padding:14px;background:#1a73e8;color:#fff;border:none;border-radius:14px;cursor:pointer;font-weight:700;font-size:14px;">💾 Save</button>' +
-                '<button id="geohelper-reset" style="padding:14px;background:#fff;color:#ef4444;border:2px solid #ef4444;border-radius:14px;cursor:pointer;font-weight:700;font-size:14px;">🔄 Reset</button>' +
+            '<button id="geohelper-save" style="padding:14px;background:#1a73e8;color:#fff;border:none;border-radius:14px;cursor:pointer;font-weight:700;font-size:14px;">💾 Save</button>' +
+            '<button id="geohelper-reset" style="padding:14px;background:#fff;color:#ef4444;border:2px solid #ef4444;border-radius:14px;cursor:pointer;font-weight:700;font-size:14px;">🔄 Reset</button>' +
             '</div>' +
-        '</div>';
+            '</div>';
     }
 
     function buildHotkeyRowsHtml(savedHotkeys) {
@@ -5170,7 +5475,7 @@ AUTO PIN MODE:
             return '<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #f3f4f6;">' +
                 '<div><label style="font-size:13px;font-weight:600;text-transform:capitalize;">' + label + '</label><div style="font-size:10px;color:#9ca3af;">' + desc + '</div></div>' +
                 '<input type="text" maxlength="10" data-hotkey="' + hk + '" value="' + value + '" style="width:80px;text-align:center;padding:8px;border:2px solid #e5e7eb;border-radius:10px;font-size:12px;font-weight:700;color:#ec4899;">' +
-            '</div>';
+                '</div>';
         }).join('');
     }
 
@@ -5178,78 +5483,78 @@ AUTO PIN MODE:
         const hotkeyRows = buildHotkeyRowsHtml(savedHotkeys);
         return '<div style="background:linear-gradient(135deg, #ec4899 0%, #be185d 100%);padding:16px 20px;display:flex;align-items:center;gap:12px;">' +
             '<h2 style="margin:0;font-size:18px;font-weight:700;color:#fff;">⌨️ Hotkeys</h2>' +
-        '</div>' +
-        '<div style="flex:1;overflow-y:auto;padding:16px;">' +
+            '</div>' +
+            '<div style="flex:1;overflow-y:auto;padding:16px;">' +
             '<div style="background:#fff;border-radius:16px;padding:16px;margin-bottom:16px;">' +
-                '<div style="font-size:12px;color:#6b7280;font-weight:700;margin-bottom:14px;">🎮 Key Bindings</div>' +
-                hotkeyRows +
+            '<div style="font-size:12px;color:#6b7280;font-weight:700;margin-bottom:14px;">🎮 Key Bindings</div>' +
+            hotkeyRows +
             '</div>' +
             '<button id="geohelper-hotkeys-save" style="width:100%;padding:14px;background:linear-gradient(135deg, #ec4899 0%, #be185d 100%);color:#fff;border:none;border-radius:14px;cursor:pointer;font-weight:700;font-size:14px;">💾 Save Hotkeys</button>' +
-        '</div>';
+            '</div>';
     }
 
     function buildDiscordViewHtml(savedWebhook) {
         return '<div style="background:linear-gradient(135deg, #5865F2 0%, #4752c4 100%);padding:16px 20px;display:flex;align-items:center;gap:12px;">' +
             '<h2 style="margin:0;font-size:18px;font-weight:700;color:#fff;">💬 Discord</h2>' +
-        '</div>' +
-        '<div style="flex:1;overflow-y:auto;padding:16px;">' +
+            '</div>' +
+            '<div style="flex:1;overflow-y:auto;padding:16px;">' +
             '<div style="background:#fff;border-radius:16px;padding:16px;margin-bottom:16px;">' +
-                '<div style="font-size:12px;color:#6b7280;font-weight:700;margin-bottom:12px;">🔗 Webhook URL</div>' +
-                '<input type="text" id="geohelper-discord-webhook" value="' + Security.escapeAttr(savedWebhook) + '" placeholder="https://discord.com/api/webhooks/..." style="width:100%;padding:14px;border:2px solid #e5e7eb;border-radius:12px;font-size:13px;">' +
+            '<div style="font-size:12px;color:#6b7280;font-weight:700;margin-bottom:12px;">🔗 Webhook URL</div>' +
+            '<input type="text" id="geohelper-discord-webhook" value="' + Security.escapeAttr(savedWebhook) + '" placeholder="https://discord.com/api/webhooks/..." style="width:100%;padding:14px;border:2px solid #e5e7eb;border-radius:12px;font-size:13px;">' +
             '</div>' +
             '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">' +
-                '<button id="geohelper-discord-save" style="padding:14px;background:linear-gradient(135deg, #5865F2 0%, #4752c4 100%);color:#fff;border:none;border-radius:14px;cursor:pointer;font-weight:700;">💾 Save</button>' +
-                '<button id="geohelper-discord-test" style="padding:14px;background:#fff;color:#5865F2;border:2px solid #5865F2;border-radius:14px;cursor:pointer;font-weight:700;">🧪 Test</button>' +
+            '<button id="geohelper-discord-save" style="padding:14px;background:linear-gradient(135deg, #5865F2 0%, #4752c4 100%);color:#fff;border:none;border-radius:14px;cursor:pointer;font-weight:700;">💾 Save</button>' +
+            '<button id="geohelper-discord-test" style="padding:14px;background:#fff;color:#5865F2;border:2px solid #5865F2;border-radius:14px;cursor:pointer;font-weight:700;">🧪 Test</button>' +
             '</div>' +
-        '</div>';
+            '</div>';
     }
 
     function buildCopyViewHtml() {
         return '<div style="background:linear-gradient(135deg, #f59e0b 0%, #d97706 100%);padding:16px 20px;display:flex;align-items:center;gap:12px;">' +
             '<h2 style="margin:0;font-size:18px;font-weight:700;color:#fff;">📋 Copy</h2>' +
-        '</div>' +
-        '<div style="flex:1;overflow-y:auto;padding:16px;">' +
+            '</div>' +
+            '<div style="flex:1;overflow-y:auto;padding:16px;">' +
             '<div style="background:#fff;border-radius:16px;padding:20px;margin-bottom:16px;">' +
-                '<div id="geohelper-copy-coords" style="font-family:monospace;font-size:16px;font-weight:600;text-align:center;padding:16px;background:#f9fafb;border-radius:12px;">Waiting for location...</div>' +
+            '<div id="geohelper-copy-coords" style="font-family:monospace;font-size:16px;font-weight:600;text-align:center;padding:16px;background:#f9fafb;border-radius:12px;">Waiting for location...</div>' +
             '</div>' +
             '<button id="geohelper-copy-main" style="width:100%;padding:16px;background:linear-gradient(135deg, #f59e0b 0%, #d97706 100%);color:#fff;border:none;border-radius:16px;cursor:pointer;font-size:15px;font-weight:600;">📋 Copy Coordinates</button>' +
-        '</div>';
+            '</div>';
     }
 
     function buildMapsViewHtml() {
         return '<div style="background:linear-gradient(135deg, #1a73e8 0%, #1557b0 100%);padding:16px 20px;display:flex;align-items:center;gap:12px;">' +
             '<h2 style="margin:0;font-size:18px;font-weight:700;color:#fff;">🗺️ Maps</h2>' +
-        '</div>' +
-        '<div style="flex:1;overflow-y:auto;padding:16px;">' +
+            '</div>' +
+            '<div style="flex:1;overflow-y:auto;padding:16px;">' +
             '<div style="background:#fff;border-radius:16px;overflow:hidden;margin-bottom:16px;">' +
-                '<div style="padding:14px 16px;border-bottom:1px solid #f3f4f6;font-size:13px;font-weight:600;">🎨 Map Layer Style</div>' +
-                '<button data-map-layer="default" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-default" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">OpenStreetMap</span></button>' +
-                '<button data-map-layer="dark" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-dark" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">Carto Dark</span></button>' +
-                '<button data-map-layer="light" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-light" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">Carto Light</span></button>' +
-                '<button data-map-layer="terrain" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-terrain" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">OpenTopoMap</span></button>' +
-                '<button data-map-layer="voyager" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-voyager" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">Voyager</span></button>' +
-                '<button data-map-layer="positron" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-positron" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">Positron</span></button>' +
-                '<button data-map-layer="satellite" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-satellite" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">ESRI Satellite</span></button>' +
-                '<button data-map-layer="hybrid" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-hybrid" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">Satellite Hybrid</span></button>' +
+            '<div style="padding:14px 16px;border-bottom:1px solid #f3f4f6;font-size:13px;font-weight:600;">🎨 Map Layer Style</div>' +
+            '<button data-map-layer="default" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-default" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">OpenStreetMap</span></button>' +
+            '<button data-map-layer="dark" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-dark" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">Carto Dark</span></button>' +
+            '<button data-map-layer="light" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-light" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">Carto Light</span></button>' +
+            '<button data-map-layer="terrain" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-terrain" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">OpenTopoMap</span></button>' +
+            '<button data-map-layer="voyager" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-voyager" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">Voyager</span></button>' +
+            '<button data-map-layer="positron" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-positron" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">Positron</span></button>' +
+            '<button data-map-layer="satellite" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-satellite" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">ESRI Satellite</span></button>' +
+            '<button data-map-layer="hybrid" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-hybrid" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">Satellite Hybrid</span></button>' +
             '</div>' +
             '<div id="geohelper-open-gmaps" style="background:#fff;border-radius:16px;padding:16px;cursor:pointer;display:flex;align-items:center;gap:14px;">' +
-                '<div style="width:44px;height:44px;background:#eff6ff;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px;">🌐</div>' +
-                '<div style="flex:1;"><div style="font-size:15px;font-weight:500;">Open in Google Maps</div><div style="font-size:13px;color:#6b7280;">View current location</div></div>' +
-                '<span style="font-size:20px;color:#9ca3af;">›</span>' +
+            '<div style="width:44px;height:44px;background:#eff6ff;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px;">🌐</div>' +
+            '<div style="flex:1;"><div style="font-size:15px;font-weight:500;">Open in Google Maps</div><div style="font-size:13px;color:#6b7280;">View current location</div></div>' +
+            '<span style="font-size:20px;color:#9ca3af;">›</span>' +
             '</div>' +
-        '</div>';
+            '</div>';
     }
 
     function buildHistoryViewHtml() {
         return '<div style="background:linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);padding:16px 20px;display:flex;align-items:center;justify-content:space-between;">' +
             '<div style="display:flex;align-items:center;gap:12px;">' +
-                '<h2 style="margin:0;font-size:18px;font-weight:700;color:#fff;">📜 History</h2>' +
+            '<h2 style="margin:0;font-size:18px;font-weight:700;color:#fff;">📜 History</h2>' +
             '</div>' +
             '<div id="geohelper-history-count" style="background:rgba(255,255,255,0.2);padding:4px 10px;border-radius:12px;font-size:11px;color:#fff;font-weight:600;">0 rounds</div>' +
-        '</div>' +
-        '<div id="geohelper-history-content" style="flex:1;overflow-y:auto;padding:16px;">' +
+            '</div>' +
+            '<div id="geohelper-history-content" style="flex:1;overflow-y:auto;padding:16px;">' +
             '<div id="geohelper-history-list"></div>' +
-        '</div>';
+            '</div>';
     }
 
     function buildHistoryEmptyStateHtml() {
@@ -5257,7 +5562,7 @@ AUTO PIN MODE:
             '<div style="font-size:48px;margin-bottom:16px;opacity:0.5;">📭</div>' +
             '<div style="color:#6b7280;font-size:14px;font-weight:500;margin-bottom:8px;">No History Yet</div>' +
             '<div style="color:#9ca3af;font-size:12px;">Play a round to start tracking your locations</div>' +
-        '</div>';
+            '</div>';
     }
 
     function buildHistoryActionRowsHtml() {
@@ -5269,13 +5574,13 @@ AUTO PIN MODE:
         return '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;">' +
             '<button data-history-action="copy-latest" style="flex:1;min-width:80px;padding:10px;border:1px solid #d1d5db;background:#fff;border-radius:10px;cursor:pointer;font-size:12px;font-weight:600;">📋 Copy Latest</button>' +
             '<button data-history-action="copy-all" style="flex:1;min-width:80px;padding:10px;border:1px solid #d1d5db;background:#fff;border-radius:10px;cursor:pointer;font-size:12px;font-weight:600;">📄 Copy All</button>' +
-        '</div>' +
-        '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;">' +
+            '</div>' +
+            '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;">' +
             '<button data-history-action="export-json" style="flex:1;padding:10px;border:1px solid #d1d5db;background:#fff;border-radius:10px;cursor:pointer;font-size:12px;font-weight:600;">💾 JSON</button>' +
             '<button data-history-action="export-csv" style="flex:1;padding:10px;border:1px solid #d1d5db;background:#fff;border-radius:10px;cursor:pointer;font-size:12px;font-weight:600;">📊 CSV</button>' +
             '<button data-history-action="import-json" style="flex:1;padding:10px;border:1px solid #d1d5db;background:#fff;border-radius:10px;cursor:pointer;font-size:12px;font-weight:600;">📥 Import</button>' +
             '<button data-history-action="undo-import" style="flex:1;padding:10px;border:1px solid #d1d5db;background:' + undoBg + ';color:' + undoColor + ';border-radius:10px;cursor:' + undoCursor + ';font-size:12px;font-weight:600;">↩️ Undo</button>' +
-        '</div>';
+            '</div>';
     }
 
     function buildHistoryEntryCardHtml(entry) {
@@ -5285,15 +5590,15 @@ AUTO PIN MODE:
 
         return '<div style="background:#fff;border-radius:14px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,0.08);">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">' +
-                '<div style="display:flex;align-items:center;gap:8px;">' +
-                    '<span style="background:linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);color:#fff;padding:4px 10px;border-radius:8px;font-size:11px;font-weight:700;">R' + entry.round + '</span>' +
-                    '<span style="font-size:11px;color:#9ca3af;">' + date + ' ' + time + '</span>' +
-                '</div>' +
-                '<button data-copy-entry="' + entry.round + '" style="background:#f3f4f6;border:none;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;">📋</button>' +
+            '<div style="display:flex;align-items:center;gap:8px;">' +
+            '<span style="background:linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);color:#fff;padding:4px 10px;border-radius:8px;font-size:11px;font-weight:700;">R' + entry.round + '</span>' +
+            '<span style="font-size:11px;color:#9ca3af;">' + date + ' ' + time + '</span>' +
+            '</div>' +
+            '<button data-copy-entry="' + entry.round + '" style="background:#f3f4f6;border:none;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;">📋</button>' +
             '</div>' +
             '<div style="font-size:13px;color:#374151;line-height:1.4;margin-bottom:6px;font-weight:500;">' + safeAddress + '</div>' +
             '<div style="font-family:monospace;font-size:12px;color:#6b7280;background:#f9fafb;padding:6px 10px;border-radius:8px;">' + entry.lat.toFixed(6) + ', ' + entry.lng.toFixed(6) + '</div>' +
-        '</div>';
+            '</div>';
     }
 
     function buildRoundHistoryRowsHtml(history) {
@@ -5301,12 +5606,12 @@ AUTO PIN MODE:
             const time = new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             return '<div style="padding:10px 12px;border:1px solid #e5e7eb;border-radius:10px;background:#fff;margin-bottom:8px;">' +
                 '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">' +
-                    '<span style="font-size:11px;color:#6b7280;font-weight:700;">ROUND ' + entry.round + '</span>' +
-                    '<span style="font-size:11px;color:#9ca3af;">' + time + '</span>' +
+                '<span style="font-size:11px;color:#6b7280;font-weight:700;">ROUND ' + entry.round + '</span>' +
+                '<span style="font-size:11px;color:#9ca3af;">' + time + '</span>' +
                 '</div>' +
                 '<div style="font-size:12px;color:#374151;line-height:1.3;margin-bottom:4px;">' + Security.escapeHtml(entry.address) + '</div>' +
                 '<div style="font-family:monospace;font-size:12px;color:#111827;">' + entry.lat.toFixed(5) + ', ' + entry.lng.toFixed(5) + '</div>' +
-            '</div>';
+                '</div>';
         }).join('');
     }
 
@@ -5323,7 +5628,7 @@ AUTO PIN MODE:
             '<button data-history-action="export-csv" style="padding:6px 10px;border:1px solid #d1d5db;background:#fff;border-radius:8px;cursor:pointer;font-size:11px;">CSV</button>' +
             '<button data-history-action="import-json" style="padding:6px 10px;border:1px solid #d1d5db;background:#fff;border-radius:8px;cursor:pointer;font-size:11px;">Import</button>' +
             '<button data-history-action="undo-import" style="padding:6px 10px;border:1px solid #d1d5db;background:' + undoBg + ';color:' + undoColor + ';border-radius:8px;cursor:' + undoCursor + ';font-size:11px;">Undo</button>' +
-        '</div>';
+            '</div>';
     }
 
     function getHistoryRenderSignature() {
@@ -5342,31 +5647,31 @@ AUTO PIN MODE:
 
         const flagRow = countryCode
             ? '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #2a303a;">' +
-                '<img src="https://flagcdn.com/32x24/' + countryCode + '.png" style="width:32px;height:auto;border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,0.15);" alt="' + countryCodeLabel + '"/>' +
-                '<div>' +
-                    '<div style="font-size:14px;font-weight:700;color:#f3f4f6;">' + countryName + '</div>' +
-                    '<div style="font-size:11px;color:#9ca3af;">' + countryCodeLabel + '</div>' +
-                '</div>' +
+            '<img src="https://flagcdn.com/32x24/' + countryCode + '.png" style="width:32px;height:auto;border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,0.15);" alt="' + countryCodeLabel + '"/>' +
+            '<div>' +
+            '<div style="font-size:14px;font-weight:700;color:#f3f4f6;">' + countryName + '</div>' +
+            '<div style="font-size:11px;color:#9ca3af;">' + countryCodeLabel + '</div>' +
+            '</div>' +
             '</div>'
             : '';
 
         return '<div style="margin-bottom:12px;">' +
             '<div style="background:#15181d;padding:14px;border-radius:14px;border:1px solid #262b34;box-shadow:none;">' +
-                flagRow +
-                '<div style="font-size:13px;color:#e5e7eb;line-height:1.5;">' + formatted + '</div>' +
+            flagRow +
+            '<div style="font-size:13px;color:#e5e7eb;line-height:1.5;">' + formatted + '</div>' +
             '</div>' +
-        '</div>';
+            '</div>';
     }
 
     function buildAddressLoadingHtml() {
         return '<div style="margin-bottom:12px;">' +
             '<div style="background:#15181d;padding:14px;border-radius:14px;border:1px solid #262b34;box-shadow:none;">' +
-                '<div style="display:flex;align-items:center;gap:8px;">' +
-                    '<div style="width:8px;height:8px;border-radius:50%;background:#fbbf24;animation:pulse 1.5s infinite;"></div>' +
-                    '<span style="font-size:13px;color:#d1d5db;">Loading address...</span>' +
-                '</div>' +
+            '<div style="display:flex;align-items:center;gap:8px;">' +
+            '<div style="width:8px;height:8px;border-radius:50%;background:#fbbf24;animation:pulse 1.5s infinite;"></div>' +
+            '<span style="font-size:13px;color:#d1d5db;">Loading address...</span>' +
             '</div>' +
-        '</div>';
+            '</div>' +
+            '</div>';
     }
 
     function buildLocationSearchingHtml() {
@@ -5374,7 +5679,41 @@ AUTO PIN MODE:
             '<div style="font-size:36px;margin-bottom:12px;">🛰️</div>' +
             '<div style="color:#e5e7eb;font-size:13px;font-weight:500;">Searching for location...</div>' +
             '<div style="color:#9ca3af;font-size:11px;margin-top:6px;">This may take a few seconds</div>' +
-        '</div>';
+            '</div>';
+    }
+
+    /**
+     * Build the Realtime Tracker view HTML.
+     */
+    function buildRealtimeViewHtml() {
+        return '<div style="padding:16px;height:100%;display:flex;flex-direction:column;color:#1f2937;">' +
+            '<div style="font-size:18px;font-weight:800;margin-bottom:20px;color:#111827;">📡 Web Socket Tracker</div>' +
+            '<div style="background:#fff;border-radius:14px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.1); flex: 1;">' +
+            buildWsStatusRowHtml('Status', 'ws-status-val', state.ws.status) +
+            buildWsStatusRowHtml('Room', 'ws-room-val', CONFIG.REALTIME_CONFIG.ROOM) +
+            buildWsStatusRowHtml('Sent', 'ws-sent-val', state.ws.messagesSent) +
+            buildWsStatusRowHtml('Queued', 'ws-queued-val', state.ws.messagesQueued) +
+            buildWsStatusRowHtml('Reconnects', 'ws-reconnect-val', state.ws.reconnectCount) +
+            buildWsStatusRowHtml('Last Update', 'ws-time-val', state.ws.lastUpdateTime ? new Date(state.ws.lastUpdateTime).toLocaleTimeString() : 'N/A') +
+            '</div>' +
+            '<div style="margin-top:16px; display:flex; flex-direction:column; gap:8px;">' +
+            '<button id="ws-open-map-btn" style="width:100%;padding:12px;background:#3b82f6;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;">🔗 Open Realtime Map</button>' +
+            '<div style="display:flex;gap:8px;">' +
+            '<button id="ws-connect-btn" style="flex:1;padding:12px;background:#10b981;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;">Connect</button>' +
+            '<button id="ws-disconnect-btn" style="flex:1;padding:12px;background:#ef4444;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;">Disconnect</button>' +
+            '</div>' +
+            '</div>' +
+            '</div>';
+    }
+
+    /**
+     * Build a row for the WebSocket status table.
+     */
+    function buildWsStatusRowHtml(label, id, value) {
+        return '<div style="display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid #f3f4f6;">' +
+            '<span style="font-weight:600;color:#6b7280;font-size:13px;">' + label + '</span>' +
+            '<span id="' + id + '" style="font-family:monospace;font-size:13px;font-weight:700;color:#1f2937;">' + value + '</span>' +
+            '</div>';
     }
 
     function createInfoDisplay() {
@@ -5472,6 +5811,7 @@ AUTO PIN MODE:
             { id: 'geohelper-app-history', icon: '📜', label: 'History', bg: 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)' },
             { id: 'geohelper-app-hotkeys', icon: '⌨️', label: 'Hotkeys', bg: 'linear-gradient(135deg, #ec4899 0%, #be185d 100%)' },
             { id: 'geohelper-app-discord', icon: '💬', label: 'Discord', bg: 'linear-gradient(135deg, #5865F2 0%, #4752c4 100%)' },
+            { id: 'geohelper-app-websocket', icon: '📡', label: 'Web Socket', bg: 'linear-gradient(135deg, #f43f5e 0%, #e11d48 100%)' },
             { id: 'geohelper-app-settings', icon: '⚙️', label: 'Settings', bg: 'linear-gradient(135deg, #6b7280 0%, #374151 100%)' }
         ];
 
@@ -5481,8 +5821,8 @@ AUTO PIN MODE:
             appBtn.className = 'geohelper-app-btn';
             appBtn.style.cssText = `display: flex; flex-direction: column; align-items: center; gap: 5px; cursor: pointer; transition: transform 0.15s; user-select: none;`;
             appBtn.innerHTML = buildAppButtonHtml(app);
-            appBtn.onmouseenter = function() { this.style.transform = 'scale(1.05)'; };
-            appBtn.onmouseleave = function() { this.style.transform = 'scale(1)'; };
+            appBtn.onmouseenter = function () { this.style.transform = 'scale(1.05)'; };
+            appBtn.onmouseleave = function () { this.style.transform = 'scale(1)'; };
             appBtn.addEventListener('click', (e) => e.stopPropagation());
             appGrid.appendChild(appBtn);
         });
@@ -5523,6 +5863,11 @@ AUTO PIN MODE:
         historyView.style.cssText = `min-width: 100%; display: flex; flex-direction: column; background: #f3f4f6; height: 100%;`;
         historyView.innerHTML = buildHistoryViewHtml();
 
+        const realtimeAppView = document.createElement('div');
+        realtimeAppView.id = 'geohelper-realtime-view';
+        realtimeAppView.style.cssText = `min-width: 100%; display: flex; flex-direction: column; background: #f3f4f6; height: 100%;`;
+        realtimeAppView.innerHTML = buildRealtimeViewHtml();
+
         viewsContainer.appendChild(mapView);
         viewsContainer.appendChild(menuView);
         viewsContainer.appendChild(settingsView);
@@ -5531,6 +5876,7 @@ AUTO PIN MODE:
         viewsContainer.appendChild(copyView);
         viewsContainer.appendChild(mapsView);
         viewsContainer.appendChild(historyView);
+        viewsContainer.appendChild(realtimeAppView);
         contentArea.appendChild(viewsContainer);
 
         const navBar = document.createElement('div');
@@ -5623,6 +5969,7 @@ AUTO PIN MODE:
             }
             if (view === 'mapsApp') setMapLayerButtonsUi(mapsView);
             if (view === 'historyApp') refreshHistoryView();
+            if (view === 'realtimeApp') RealtimeTracker.updateWsDisplay();
 
             applyPhoneLikeButtonTheme(phoneFrame);
         };
@@ -5637,6 +5984,7 @@ AUTO PIN MODE:
         applyPhoneLikeButtonTheme(phoneFrame);
         applyOneUiAppViews(phoneFrame, true);
         wirePhoneSettings(phoneFrame);
+        wirePhoneRealtime(phoneFrame);
 
         state._uiRefs = {
             display: phoneFrame,
@@ -5666,8 +6014,8 @@ AUTO PIN MODE:
         if (state.infoVisible) {
             const freshCoords = extractCoordinates();
             const coords = (freshCoords && Validators.isValidCoord(freshCoords.lat, freshCoords.lng))
-            ? freshCoords
-            : (Validators.isValidCoord(state.coords.lat, state.coords.lng) ? state.coords : null);
+                ? freshCoords
+                : (Validators.isValidCoord(state.coords.lat, state.coords.lng) ? state.coords : null);
 
             let html = '';
 
@@ -5691,8 +6039,8 @@ AUTO PIN MODE:
                     if (state._pendingAddressCoords !== lookupKey) {
                         state._pendingAddressCoords = lookupKey;
                         const panelAddressToken = state.runtime?.flags?.USE_REQUEST_TOKENING
-                        ? RequestTokens.issue('address_panel')
-                        : 0;
+                            ? RequestTokens.issue('address_panel')
+                            : 0;
                         if (state.runtime?.flags?.USE_REQUEST_TOKENING) {
                             telemetryInc('async.addressIssued');
                         }
@@ -5872,6 +6220,10 @@ AUTO PIN MODE:
         startMonitoring();
         Logger.debug('Coordinate monitoring started');
 
+        if (CONFIG.REALTIME_CONFIG.WS_URL && CONFIG.REALTIME_CONFIG.WS_URL !== "wss://YOUR_WORKER_URL/ws?room=main&role=sender") {
+            RealtimeTracker.connect();
+        }
+
         setTimeout(() => {
             Logger.debug('Attempting to find map instance...');
             findMapInstance();
@@ -5934,6 +6286,10 @@ AUTO PIN MODE:
         if (monitoringInterval) {
             clearInterval(monitoringInterval);
             monitoringInterval = null;
+        }
+
+        if (typeof RealtimeTracker !== 'undefined') {
+            RealtimeTracker.disconnect();
         }
 
         if (phoneClockInterval) {
