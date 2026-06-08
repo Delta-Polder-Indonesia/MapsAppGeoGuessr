@@ -1,0 +1,6111 @@
+// ==UserScript==
+// @name         🏆 #1. GeoGuessr A.M.A.S (Advanced Mapping Analysis System)
+// @namespace    https://github.com/JD-YH03D/release
+// @version      2.1.1
+// @description  Professional GeoGuessr enhancement suite featuring real-time map analysis, coordinate intelligence, metadata extraction, and advanced exploration utilities.
+// @author       Bintang Toba Pro
+// @license      MIT
+// @match        *://*.geoguessr.com/*
+// @match        *://openguessr.com/*
+// @match        *://*.worldguessr.com/*
+// @match        *://*.worldguessr.net/*
+// @match        *://freeguessr.com/*
+// @match        *://geoduels.io/*
+// @match        *://guesswhereyouare.com/*
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
+// @grant        GM_info
+// @connect      nominatim.openstreetmap.org
+// @connect      discord.com
+// @connect      raw.githubusercontent.com
+// @connect      npoint.io
+// @run-at       document-idle
+// @icon         https://raw.githubusercontent.com/JD-YH03D/BintangToba/main/icon.svg
+// @downloadURL https://update.greasyfork.org/scripts/578278/%F0%9F%8F%86%201%20GeoGuessr%20AMAS%20%28Advanced%20Mapping%20Analysis%20System%29.user.js
+// @updateURL https://update.greasyfork.org/scripts/578278/%F0%9F%8F%86%201%20GeoGuessr%20AMAS%20%28Advanced%20Mapping%20Analysis%20System%29.meta.js
+// ==/UserScript==
+
+/* global google, L */
+
+/*
+┌─────────────────────────────────────────────────────────────────────────────┐
+| Key   | Function           | Description                                    |
+| ----- | ------------------ | ---------------------------------------------- |
+|`Home` | Open the GUI panel | Open/close settings interface                  |
+| `V`   | Info Panel         | Toggle location info display                   |
+| `M`   | Manual Marker      | Place marker on game map                       |
+| `X`   | Refresh            | Reset for next round                           |
+| `1`   | Auto Place         | Auto OFF: internal marker | ON: click game map |
+| `2`   | Safe Place         | Same as 1 but with ~50m random offset          |
+| `S`   | Zoom In            | Increase mini-map zoom level                   |
+| `A`   | Zoom Out           | Decrease mini-map zoom level                   |
+| `C`   | Copy Coords        | Copy coordinates to clipboard                  |
+| `G`   | Google Maps        | Open location in Google Maps                   |
+| `D`   | Discord            | Send location to Discord webhook               |
+└─────────────────────────────────────────────────────────────────────────────┘
+
+MARKER MODE:
+  Auto Marker OFF → marker placement stays manual
+  Auto Marker ON  → marker/pin can be placed automatically each round
+
+AUTO PIN MODE:
+  OFF → "1"/"2" places internal marker only
+  ON  → "1" pins exact location on game map, "2" pins with safe jitter
+*/
+
+/**
+ * ============================================================================
+ * BINTANG TOBA PRO - GeoGuessr Assistant
+ * ============================================================================
+ *
+ * A professional-grade geography game assistant with:
+ * - Real-time coordinate extraction
+ * - Mini map with multiple layer options
+ * - Discord integration
+ * - Customizable hotkeys
+ * - Session backup/restore
+ * - Safe mode for anti-detection
+ * @ __btpDebug.getProtectionState()
+ * @author Bintang Toba Pro
+ * @version 2.1.1
+ * @license MIT
+ * ============================================================================
+ */
+
+(function () {
+    'use strict';
+
+    // ========================================================================
+    // [SECTION 1] CONSTANTS & CONFIGURATION
+    // ========================================================================
+
+    const INIT_GUARD_KEY = '__btp_initialized';
+
+    const CLEANUP_GUARD_KEY = '__btp_cleaned';
+
+    const CONFIG = Object.freeze({
+
+        NAME: 'Bintang Toba Pro',
+        VERSION: '2.1.1',
+        DEBUG: false, // Set to true for verbose logging
+
+        NOMINATIM_URL: 'https://nominatim.openstreetmap.org/reverse',
+        LEAFLET_CSS: 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
+        LEAFLET_JS: 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
+        VERSION_METADATA_URL: 'https://api.npoint.io/65be7341bb21bbcf9458',
+
+        STORAGE_KEYS: Object.freeze({
+            DISCORD_WEBHOOK: 'bintang_toba_discord_webhook',
+            HOTKEYS: 'bintang_toba_hotkeys',
+            PRESET: 'bintang_toba_preset',
+            MAP_LAYER: 'bintang_toba_map_layer',
+            THEME: 'bintang_toba_theme_mode',
+            UI_SCALE: 'bintang_toba_ui_scale',
+            JITTER_DISTANCE: 'bintang_toba_jitter_distance',
+            JITTER_UNIT: 'bintang_toba_jitter_unit',
+            UI_LEFT: 'bintang_toba_ui_left',
+            UI_TOP: 'bintang_toba_ui_top',
+            FEATURES: 'bintang_toba_features',
+            DEBUG: 'bintang_toba_debug',
+            INTEGRITY_CACHE: 'bintang_toba_integrity_cache',
+            PROTECTION_STATE: 'bintang_toba_protection_state',
+            REMOTE_VERSION_CACHE: 'bintang_toba_remote_version_cache'
+        }),
+
+        TIMING: Object.freeze({
+            MONITORING_INTERVAL: 500,
+            EXTRACT_LOG_INTERVAL: 5000,
+            ADDRESS_RATE_LIMIT_GEOGUESSR: 1000,
+            ADDRESS_RATE_LIMIT_DEFAULT: 1500,
+            EXTRACTION_CACHE_TTL: 400,
+            HOTKEY_CACHE_TTL: 10000,
+            KEYDOWN_DEBOUNCE: 50,
+            LEAFLET_LOAD_TIMEOUT: 10000,
+            LEAFLET_POLL_INTERVAL: 50,
+            MAP_FIND_DELAY: 2000,
+            BUTTON_FEEDBACK_DURATION: 1500,
+            CLOCK_UPDATE_INTERVAL: 60000,
+            INTEGRITY_CHECK_INTERVAL: 180000,
+            INTEGRITY_HEARTBEAT_INTERVAL: 45000,
+            INTEGRITY_FETCH_TIMEOUT: 10000,
+            INTEGRITY_CACHE_TTL: 300000,
+            INTEGRITY_MIN_FETCH_GAP: 30000
+        }),
+
+        COOLDOWNS: Object.freeze({
+            TOGGLE_PANEL: 150,
+            MARKER: 200,
+            REFRESH: 500,
+            INFO: 200,
+            COPY: 350,
+            MAPS: 600,
+            AUTO_PLACE: 250,
+            SAFE_PLACE: 250,
+            ZOOM: 100,
+            DISCORD: 700,
+            DISCORD_SEND: 1500,
+            HISTORY_COPY: 400,
+            HISTORY_EXPORT: 700,
+            SESSION_BACKUP: 700
+        }),
+
+        MAP: Object.freeze({
+            DEFAULT_ZOOM: 13,
+            WORLD_VIEW_ZOOM: 2,
+            MIN_ZOOM: 1,
+            PAN_THRESHOLD: 0.0001,
+            JUMP_THRESHOLD: 1.0,
+            NEW_ROUND_THRESHOLD: 0.1,
+            SAFE_MODE_OFFSET_DEGREES: 0.00045 // ~50 meters
+        }),
+
+        LIMITS: Object.freeze({
+            HISTORY_MAX_ITEMS: 10,
+            ADDRESS_QUEUE_MAX: 5,
+            FIBER_WALK_MAX_DEPTH: 15
+        }),
+
+        DEFAULT_HOTKEYS: Object.freeze({
+            panel: 'Home',
+            marker: 'M',
+            info: 'V',
+            refresh: 'X',
+            zoomIn: 'S',
+            zoomOut: 'A',
+            copyCoords: 'C',
+            googleMaps: 'G',
+            discord: 'D',
+            autoPlace: '1',
+            safePlace: '2'
+        }),
+
+        DEFAULT_FEATURES: Object.freeze({
+            autoMarker: false,
+            autoPin: false,
+            safeMode: false
+        }),
+
+        PRESETS: Object.freeze({
+            exact: Object.freeze({ autoMarker: false, safeMode: false }),
+            safe: Object.freeze({ autoMarker: false, safeMode: true }),
+            stealth: Object.freeze({ autoMarker: true, safeMode: true })
+        }),
+
+        UI_SCALES: Object.freeze({
+            normal: { name: 'Normal', factor: 1 },
+            compact: { name: 'Compact', factor: 0.92 }
+        }),
+
+        MAP_LAYERS: Object.freeze({
+            default: Object.freeze({
+                name: 'OpenStreetMap',
+                url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+                options: { maxZoom: 19 }
+            }),
+            dark: Object.freeze({
+                name: 'Carto Dark',
+                url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+                options: { maxZoom: 19, subdomains: 'abcd' }
+            }),
+            light: Object.freeze({
+                name: 'Carto Light',
+                url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+                options: { maxZoom: 19, subdomains: 'abcd' }
+            }),
+            terrain: Object.freeze({
+                name: 'OpenTopoMap',
+                url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+                options: { maxZoom: 17 }
+            }),
+            voyager: Object.freeze({
+                name: 'Voyager',
+                url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+                options: { maxZoom: 20, subdomains: 'abcd' }
+            }),
+            positron: Object.freeze({
+                name: 'Positron',
+                url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+                options: { maxZoom: 20, subdomains: 'abcd' }
+            }),
+            satellite: Object.freeze({
+                name: 'ESRI Satellite',
+                url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                options: { maxZoom: 19 }
+            }),
+            hybrid: Object.freeze({
+                name: 'Satellite Hybrid',
+                url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                options: { maxZoom: 19 }
+            })
+        }),
+
+        DEFAULTS: Object.freeze({
+            MAP_LAYER: 'default',
+            THEME: 'dark',
+            UI_SCALE: 'normal',
+            PRESET: 'exact',
+            JITTER_DISTANCE: 150,
+            JITTER_UNIT: 'm'
+        }),
+
+        FLAGS: Object.freeze({
+            USE_PATCH_MANAGER: false,
+            USE_EXTRACTOR_REGISTRY: false,
+            USE_REQUEST_TOKENING: false,
+            USE_DEGRADED_MODE: false,
+            ENABLE_SHADOW_EXTRACTION_TELEMETRY: true
+        })
+    });
+
+    // ========================================================================
+    // [SECTION 2] RUNTIME STATE
+    // ========================================================================
+
+    let state = {
+
+        platform: null,
+
+        coords: { lat: null, lng: null },
+        address: null,
+
+        gameMap: null,
+        marker: null,
+        miniMap: null,
+        miniMapTileLayer: null,
+        miniMapMarker: null,
+
+        panel: null,
+        infoVisible: false,
+        miniMapVisible: false,
+        phoneView: 'map',
+        swapPhoneView: null,
+
+        hotkeys: null,
+        features: null,
+        currentPreset: CONFIG.DEFAULTS.PRESET,
+        currentMapLayer: CONFIG.DEFAULTS.MAP_LAYER,
+        themeMode: CONFIG.DEFAULTS.THEME,
+        uiScale: CONFIG.DEFAULTS.UI_SCALE,
+        jitterDistance: CONFIG.DEFAULTS.JITTER_DISTANCE,
+        jitterUnit: CONFIG.DEFAULTS.JITTER_UNIT,
+
+        roundHistory: [],
+        lastImportBackup: null,
+
+        markerPlacedThisRound: false,
+        _pendingAddressCoords: null,
+        _uiRefs: null,
+
+        runtime: {
+            flags: { ...CONFIG.FLAGS },
+            degraded: false,
+            degradedReason: null,
+            lastDegradedAt: 0,
+            protection: {
+                blocked: false,
+                forceUpdate: false,
+                modifiedBuild: false,
+                outdated: false,
+                reason: null,
+                message: '',
+                localHash: null,
+                remoteHash: null,
+                currentVersion: CONFIG.VERSION,
+                latestVersion: CONFIG.VERSION,
+                checkedAt: 0,
+                sourceAvailable: false
+            }
+        }
+    };
+
+    // ========================================================================
+    // [SECTION 3] INTERNAL TRACKING VARIABLES
+    // ========================================================================
+
+    let monitoringInterval = null;
+    let phoneClockInterval = null;
+    let phoneResizeHandler = null;
+
+    let monitoringBusy = false;
+    let monitoringBusySince = 0;
+    let oneUiViewsStyled = false;
+    let panelUiBootstrapped = false;
+    let refreshRequestId = 0;
+    let isInitialized = false;
+    let isCleaningUp = false;
+    let leafletInitializing = false;
+    let discordInFlight = false;
+    let integrityCheckInterval = null;
+    let integrityHeartbeatInterval = null;
+    let protectionErrorHandler = null;
+    let protectionRejectionHandler = null;
+
+    let lastKeydownTime = 0;
+    let lastExtractLog = 0;
+    let lastAddressCall = 0;
+
+    let hotkeyCache = null;
+    let hotkeyCacheTime = 0;
+
+    const actionCooldowns = Object.create(null);
+
+    let lastCoords = { lat: null, lng: null };
+    let interceptedCoords = { lat: null, lng: null };
+
+    let addressQueue = [];
+    let addressProcessing = false;
+    let monitoringTickCounter = 0;
+
+    const uiRenderCache = {
+        locationHtml: '',
+        historySignature: '',
+        statusText: '',
+        statusColor: '',
+        badgeText: '',
+        badgeBg: '',
+        ledStatus: ''
+    };
+
+    // ========================================================================
+    // [SECTION 3-B] PHASE 1 TELEMETRY SKELETON
+    // ========================================================================
+
+    const telemetry = {
+        startedAt: Date.now(),
+        patch: {
+            installAttempts: 0,
+            installSuccess: 0,
+            installFail: 0,
+            uninstallAttempts: 0,
+            uninstallSuccess: 0,
+            uninstallFail: 0,
+            ensureChecks: 0,
+            ensureReinstalls: 0
+        },
+        extraction: {
+            strategy: Object.create(null),
+            primaryUsed: 0,
+            fallbackToLegacy: 0,
+            shadowRuns: 0,
+            shadowMismatches: 0
+        },
+        async: {
+            addressIssued: 0,
+            addressApplied: 0,
+            addressDiscardedStale: 0,
+            refreshIssued: 0,
+            refreshApplied: 0,
+            refreshDiscardedStale: 0
+        },
+        degraded: {
+            enterCount: 0,
+            exitCount: 0,
+            current: false
+        },
+        protection: {
+            checks: 0,
+            blockedEvents: 0,
+            overlayShows: 0,
+            remoteFetchOk: 0,
+            remoteFetchFail: 0,
+            hashComputed: 0,
+            hashMismatch: 0,
+            modifiedDetected: 0,
+            forceUpdateDetected: 0,
+            outdatedDetected: 0
+        }
+    };
+
+    function telemetryInc(path, value = 1) {
+        try {
+            const parts = String(path).split('.');
+            let ref = telemetry;
+            for (let i = 0; i < parts.length - 1; i++) {
+                if (!ref[parts[i]] || typeof ref[parts[i]] !== 'object') {
+                    ref[parts[i]] = {};
+                }
+                ref = ref[parts[i]];
+            }
+            const key = parts[parts.length - 1];
+            ref[key] = (Number(ref[key]) || 0) + value;
+        } catch (e) {
+
+        }
+    }
+
+    function telemetryTime(strategyName, ms, ok) {
+        try {
+            const name = String(strategyName || 'unknown');
+            if (!telemetry.extraction.strategy[name]) {
+                telemetry.extraction.strategy[name] = {
+                    attempts: 0,
+                    success: 0,
+                    fail: 0,
+                    totalMs: 0,
+                    avgMs: 0,
+                    lastMs: 0,
+                    lastOkAt: 0,
+                    lastFailAt: 0
+                };
+            }
+            const s = telemetry.extraction.strategy[name];
+            s.attempts++;
+            s.totalMs += Math.max(0, Number(ms) || 0);
+            s.lastMs = Math.max(0, Number(ms) || 0);
+            s.avgMs = s.attempts ? +(s.totalMs / s.attempts).toFixed(3) : 0;
+            if (ok) {
+                s.success++;
+                s.lastOkAt = Date.now();
+            } else {
+                s.fail++;
+                s.lastFailAt = Date.now();
+            }
+        } catch (e) {
+
+        }
+    }
+
+    function telemetrySnapshot() {
+        try {
+            return JSON.parse(JSON.stringify(telemetry));
+        } catch (e) {
+            return {
+                startedAt: telemetry.startedAt,
+                error: 'telemetry snapshot failed'
+            };
+        }
+    }
+
+    // ========================================================================
+    // [SECTION 3-C] REQUEST TOKENS (PHASE 1)
+    // ========================================================================
+
+    const RequestTokens = {
+        _seq: 0,
+        _latestByScope: Object.create(null),
+
+        issue(scope) {
+            const key = String(scope || 'default');
+            const id = ++this._seq;
+            this._latestByScope[key] = id;
+            return id;
+        },
+
+        isCurrent(scope, id) {
+            const key = String(scope || 'default');
+            return this._latestByScope[key] === id;
+        },
+
+        resetAll() {
+            this._seq = 0;
+            this._latestByScope = Object.create(null);
+        }
+    };
+
+    // ========================================================================
+    // [SECTION 4] EXTRACTION CACHE
+    // ========================================================================
+
+    const extractionCache = {
+        result: null,
+        source: null,
+        timestamp: 0,
+        hits: 0,
+        misses: 0,
+
+        get() {
+            if (this.result && (Date.now() - this.timestamp) < CONFIG.TIMING.EXTRACTION_CACHE_TTL) {
+                this.hits++;
+                return this.result;
+            }
+            return null;
+        },
+
+        set(result, source) {
+            this.result = result;
+            this.source = source;
+            this.timestamp = Date.now();
+            this.misses++;
+        },
+
+        invalidate() {
+            this.result = null;
+            this.source = null;
+            this.timestamp = 0;
+        },
+
+        getStats() {
+            const total = this.hits + this.misses;
+            const hitRate = total > 0 ? ((this.hits / total) * 100).toFixed(1) + '%' : 'N/A';
+            return { hits: this.hits, misses: this.misses, hitRate };
+        }
+    };
+
+    // ========================================================================
+    // [SECTION 5] XHR INTERCEPTOR
+    // ========================================================================
+
+    const XHR_LISTENER_FLAG = '__btp_listened';
+    const XHR_PATCH_FLAG = '__btp_open_patched';
+    const XHR_ORIGINAL_OPEN_KEY = '__btp_original_open';
+
+    function installXHRInterceptor() {
+        if (XMLHttpRequest.prototype[XHR_PATCH_FLAG]) return;
+
+        XMLHttpRequest.prototype[XHR_ORIGINAL_OPEN_KEY] = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype[XHR_PATCH_FLAG] = true;
+
+        XMLHttpRequest.prototype.open = function (method, url) {
+            const targetUrls = [
+                'https://maps.googleapis.com/$rpc/google.internal.maps.mapsjs.v1.MapsJsInternalService/GetMetadata',
+                'https://maps.googleapis.com/$rpc/google.internal.maps.mapsjs.v1.MapsJsInternalService/SingleImageSearch'
+            ];
+
+            if (!this[XHR_LISTENER_FLAG] &&
+                method.toUpperCase() === 'POST' &&
+                targetUrls.some(target => url.startsWith(target))) {
+
+                this[XHR_LISTENER_FLAG] = true;
+                this.addEventListener('load', function () {
+                    try {
+                        const pattern = /-?\d+\.\d+,-?\d+\.\d+/g;
+                        const matches = this.responseText.match(pattern);
+                        if (matches && matches.length > 0) {
+                            const [latStr, lngStr] = matches[0].split(',');
+                            const lat = parseFloat(latStr);
+                            const lng = parseFloat(lngStr);
+                            if (Validators.isValidCoord(lat, lng)) {
+                                interceptedCoords = { lat, lng };
+                                extractionCache.invalidate();
+                                Logger.debug('XHR intercepted:', lat.toFixed(6), lng.toFixed(6));
+                            }
+                        }
+                    } catch (e) {
+
+                    }
+                });
+            }
+
+            return XMLHttpRequest.prototype[XHR_ORIGINAL_OPEN_KEY].apply(this, arguments);
+        };
+    }
+
+    function uninstallXHRInterceptor() {
+        if (XMLHttpRequest.prototype[XHR_PATCH_FLAG] && XMLHttpRequest.prototype[XHR_ORIGINAL_OPEN_KEY]) {
+            XMLHttpRequest.prototype.open = XMLHttpRequest.prototype[XHR_ORIGINAL_OPEN_KEY];
+            delete XMLHttpRequest.prototype[XHR_PATCH_FLAG];
+            delete XMLHttpRequest.prototype[XHR_ORIGINAL_OPEN_KEY];
+        }
+    }
+
+    // ========================================================================
+    // [SECTION 5-B] PATCH MANAGER (PHASE 1 WRAPPER SHELL)
+    // ========================================================================
+
+    const PatchManager = {
+        _status: {
+            xhrInstalled: false,
+            installedByUs: false,
+            lastInstallAt: 0,
+            lastUninstallAt: 0,
+            lastError: null
+        },
+
+        installXHRPatch() {
+            telemetryInc('patch.installAttempts');
+            try {
+                const wasPatchedBefore = !!XMLHttpRequest.prototype[XHR_PATCH_FLAG];
+                const hadOurOriginalBefore = !!XMLHttpRequest.prototype[XHR_ORIGINAL_OPEN_KEY];
+
+                installXHRInterceptor();
+
+                const installedNow = !!XMLHttpRequest.prototype[XHR_PATCH_FLAG];
+                const hasOurOriginalNow = !!XMLHttpRequest.prototype[XHR_ORIGINAL_OPEN_KEY];
+
+                this._status.xhrInstalled = installedNow;
+                this._status.installedByUs =
+                    (wasPatchedBefore && hadOurOriginalBefore) ||
+                    (!wasPatchedBefore && hasOurOriginalNow);
+                this._status.lastInstallAt = Date.now();
+                this._status.lastError = null;
+                telemetryInc('patch.installSuccess');
+                return this._status.xhrInstalled;
+            } catch (e) {
+                this._status.lastError = e?.message || 'install failed';
+                telemetryInc('patch.installFail');
+                return false;
+            }
+        },
+
+        uninstallXHRPatch() {
+            telemetryInc('patch.uninstallAttempts');
+            try {
+                const hasOurOriginal = !!XMLHttpRequest.prototype[XHR_ORIGINAL_OPEN_KEY];
+
+                if (hasOurOriginal || this._status.installedByUs) {
+                    uninstallXHRInterceptor();
+                }
+
+                this._status.xhrInstalled = !!XMLHttpRequest.prototype[XHR_PATCH_FLAG];
+                this._status.installedByUs = !!XMLHttpRequest.prototype[XHR_ORIGINAL_OPEN_KEY];
+                this._status.lastUninstallAt = Date.now();
+                this._status.lastError = null;
+                telemetryInc('patch.uninstallSuccess');
+                return !this._status.xhrInstalled || !hasOurOriginal;
+            } catch (e) {
+                this._status.lastError = e?.message || 'uninstall failed';
+                telemetryInc('patch.uninstallFail');
+                return false;
+            }
+        },
+
+        ensureXHRPatch() {
+            telemetryInc('patch.ensureChecks');
+            if (XMLHttpRequest.prototype[XHR_PATCH_FLAG]) {
+                this._status.xhrInstalled = true;
+                this._status.installedByUs = !!XMLHttpRequest.prototype[XHR_ORIGINAL_OPEN_KEY];
+                return true;
+            }
+            telemetryInc('patch.ensureReinstalls');
+            return this.installXHRPatch();
+        },
+
+        status() {
+            return {
+                ...this._status,
+                xhrInstalled: !!XMLHttpRequest.prototype[XHR_PATCH_FLAG]
+            };
+        }
+    };
+
+    if (state.runtime?.flags?.USE_PATCH_MANAGER) {
+        PatchManager.installXHRPatch();
+    } else {
+        installXHRInterceptor();
+    }
+
+    // ========================================================================
+    // [SECTION 6] UTILITY CLASSES & HELPERS
+    // ========================================================================
+
+    let _debugEnabled = CONFIG.DEBUG;
+    const Logger = {
+        info(...args) {
+            console.log('[BintangTobaPro]', ...args);
+        },
+        debug(...args) {
+            if (_debugEnabled) {
+                console.log('[BintangTobaPro:DBG]', ...args);
+            }
+        },
+        warn(...args) {
+            console.warn('[BintangTobaPro]', ...args);
+        },
+        error(...args) {
+            console.error('[BintangTobaPro]', ...args);
+        },
+
+        initDebugFlag() {
+            _debugEnabled = CONFIG.DEBUG || !!safeGM_getValue(CONFIG.STORAGE_KEYS.DEBUG, false);
+        }
+    };
+
+    const Security = {
+
+        escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = String(text);
+            return div.innerHTML;
+        },
+
+        escapeAttr(text) {
+            return this.escapeHtml(text).replace(/"/g, '&quot;');
+        },
+
+        encodeParam(value) {
+            return encodeURIComponent(String(value));
+        },
+
+        isValidDiscordWebhook(url) {
+            if (!url || typeof url !== 'string') return false;
+            try {
+                const parsed = new URL(url);
+                return parsed.protocol === 'https:' &&
+                    parsed.hostname === 'discord.com' &&
+                    parsed.pathname.includes('/api/webhooks/');
+            } catch (e) {
+                return false;
+            }
+        }
+    };
+
+    const Validators = {
+
+        isValidCoord(lat, lng) {
+            return typeof lat === 'number' && typeof lng === 'number' &&
+                !isNaN(lat) && !isNaN(lng) &&
+                lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
+        },
+
+        isValidPreset(presetName) {
+            return presetName && CONFIG.PRESETS.hasOwnProperty(presetName);
+        },
+
+        isValidMapLayer(layerName) {
+            return layerName && CONFIG.MAP_LAYERS.hasOwnProperty(layerName);
+        },
+
+        isValidTheme(themeName) {
+            return themeName === 'dark';
+        },
+
+        isValidUiScale(scaleName) {
+            return scaleName && CONFIG.UI_SCALES.hasOwnProperty(scaleName);
+        },
+
+        isValidJitterUnit(unit) {
+            return unit === 'm' || unit === 'km';
+        },
+
+        isValidJitterDistance(value) {
+            const n = Number(value);
+            return Number.isFinite(n) && n >= 0 && n <= 10000;
+        }
+    };
+
+    function normalizeJitterUnit(unit) {
+        return Validators.isValidJitterUnit(unit) ? unit : CONFIG.DEFAULTS.JITTER_UNIT;
+    }
+
+    function normalizeJitterDistance(value, unit) {
+        const normalizedUnit = normalizeJitterUnit(unit);
+        const step = normalizedUnit === 'km' ? 5 : 50;
+        const n = Number(value);
+        if (!Number.isFinite(n)) return CONFIG.DEFAULTS.JITTER_DISTANCE;
+        const clamped = Math.min(10000, Math.max(0, n));
+        return Math.round(clamped / step) * step;
+    }
+
+    const Throttle = {
+
+        canRun(actionKey, cooldownMs = 250) {
+            const now = Date.now();
+            const last = actionCooldowns[actionKey] || 0;
+            if ((now - last) < cooldownMs) return false;
+            actionCooldowns[actionKey] = now;
+            return true;
+        },
+
+        createHandler(actionKey, cooldownMs, handler) {
+            return function(e) {
+                if (!Throttle.canRun(actionKey, cooldownMs)) return;
+                if (e && e.preventDefault) e.preventDefault();
+                handler.call(this, e);
+            };
+        },
+
+        resetAll() {
+            Object.keys(actionCooldowns).forEach(k => delete actionCooldowns[k]);
+        }
+    };
+
+    // ========================================================================
+    // [SECTION 7] STORAGE UTILITIES
+    // ========================================================================
+
+    function safeGM_getValue(key, defaultValue) {
+        try {
+            if (typeof GM_getValue !== 'undefined') {
+                const val = GM_getValue(key);
+                return val !== undefined ? val : defaultValue;
+            }
+            const stored = localStorage.getItem(key);
+            return stored !== null ? JSON.parse(stored) : defaultValue;
+        } catch (e) {
+            Logger.debug('Storage read error:', e.message);
+            return defaultValue;
+        }
+    }
+
+    function safeGM_setValue(key, value) {
+        try {
+            if (typeof GM_setValue !== 'undefined') {
+                GM_setValue(key, value);
+            } else {
+                localStorage.setItem(key, JSON.stringify(value));
+            }
+        } catch (e) {
+            Logger.error('Storage write error:', e);
+        }
+    }
+
+    function readStoredSettings() {
+        const hotkeys = {
+            ...CONFIG.DEFAULT_HOTKEYS,
+            ...(safeGM_getValue(CONFIG.STORAGE_KEYS.HOTKEYS, null) || {})
+        };
+
+        if (hotkeys.panel === 'Tab' || hotkeys.panel === 'tab') {
+            hotkeys.panel = 'Home';
+        }
+
+        const features = {
+            ...CONFIG.DEFAULT_FEATURES,
+            ...(safeGM_getValue(CONFIG.STORAGE_KEYS.FEATURES, null) || {})
+        };
+
+        let preset = safeGM_getValue(CONFIG.STORAGE_KEYS.PRESET, null) || detectPresetFromFeatures(features);
+        if (!Validators.isValidPreset(preset)) {
+            preset = detectPresetFromFeatures(features);
+        }
+
+        let mapLayer = safeGM_getValue(CONFIG.STORAGE_KEYS.MAP_LAYER, CONFIG.DEFAULTS.MAP_LAYER);
+        if (!Validators.isValidMapLayer(mapLayer)) {
+            mapLayer = CONFIG.DEFAULTS.MAP_LAYER;
+        }
+
+        let uiScale = safeGM_getValue(CONFIG.STORAGE_KEYS.UI_SCALE, CONFIG.DEFAULTS.UI_SCALE);
+        if (!Validators.isValidUiScale(uiScale)) {
+            uiScale = CONFIG.DEFAULTS.UI_SCALE;
+        }
+
+        const jitterUnit = normalizeJitterUnit(safeGM_getValue(CONFIG.STORAGE_KEYS.JITTER_UNIT, CONFIG.DEFAULTS.JITTER_UNIT));
+        const jitterDistance = normalizeJitterDistance(
+            safeGM_getValue(CONFIG.STORAGE_KEYS.JITTER_DISTANCE, CONFIG.DEFAULTS.JITTER_DISTANCE),
+            jitterUnit
+        );
+
+        return {
+            hotkeys,
+            features,
+            preset,
+            mapLayer,
+            themeMode: 'dark',
+            uiScale,
+            jitterDistance,
+            jitterUnit,
+            discordWebhook: String(safeGM_getValue(CONFIG.STORAGE_KEYS.DISCORD_WEBHOOK, '') || '').trim()
+        };
+    }
+
+    function applySettingsToState(settings) {
+        const s = settings || readStoredSettings();
+        state.hotkeys = { ...CONFIG.DEFAULT_HOTKEYS, ...(s.hotkeys || {}) };
+        state.features = { ...CONFIG.DEFAULT_FEATURES, ...(s.features || {}) };
+        state.currentPreset = Validators.isValidPreset(s.preset) ? s.preset : detectPresetFromFeatures(state.features);
+        state.currentMapLayer = Validators.isValidMapLayer(s.mapLayer) ? s.mapLayer : CONFIG.DEFAULTS.MAP_LAYER;
+        state.themeMode = 'dark';
+        state.uiScale = Validators.isValidUiScale(s.uiScale) ? s.uiScale : CONFIG.DEFAULTS.UI_SCALE;
+        state.jitterUnit = normalizeJitterUnit(s.jitterUnit);
+        state.jitterDistance = normalizeJitterDistance(s.jitterDistance, state.jitterUnit);
+    }
+
+    function getCurrentSettingsSnapshot(overrides = null) {
+        const base = {
+            hotkeys: { ...(state.hotkeys || getHotkeys() || CONFIG.DEFAULT_HOTKEYS) },
+            features: { ...(state.features || CONFIG.DEFAULT_FEATURES) },
+            preset: state.currentPreset || detectPresetFromFeatures(state.features),
+            mapLayer: state.currentMapLayer || CONFIG.DEFAULTS.MAP_LAYER,
+            themeMode: 'dark',
+            uiScale: state.uiScale || CONFIG.DEFAULTS.UI_SCALE,
+            jitterDistance: state.jitterDistance ?? CONFIG.DEFAULTS.JITTER_DISTANCE,
+            jitterUnit: state.jitterUnit || CONFIG.DEFAULTS.JITTER_UNIT,
+            discordWebhook: String(safeGM_getValue(CONFIG.STORAGE_KEYS.DISCORD_WEBHOOK, '') || '').trim()
+        };
+
+        const next = {
+            ...base,
+            ...(overrides || {})
+        };
+
+        next.hotkeys = { ...CONFIG.DEFAULT_HOTKEYS, ...(next.hotkeys || {}) };
+        next.features = { ...CONFIG.DEFAULT_FEATURES, ...(next.features || {}) };
+        next.preset = Validators.isValidPreset(next.preset) ? next.preset : detectPresetFromFeatures(next.features);
+        next.mapLayer = Validators.isValidMapLayer(next.mapLayer) ? next.mapLayer : CONFIG.DEFAULTS.MAP_LAYER;
+        next.uiScale = Validators.isValidUiScale(next.uiScale) ? next.uiScale : CONFIG.DEFAULTS.UI_SCALE;
+        next.jitterUnit = normalizeJitterUnit(next.jitterUnit);
+        next.jitterDistance = normalizeJitterDistance(next.jitterDistance, next.jitterUnit);
+        next.themeMode = 'dark';
+        next.discordWebhook = String(next.discordWebhook || '').trim();
+
+        return next;
+    }
+
+    function persistSettingsSnapshot(settings) {
+        const s = getCurrentSettingsSnapshot(settings);
+        safeGM_setValue(CONFIG.STORAGE_KEYS.HOTKEYS, s.hotkeys);
+        safeGM_setValue(CONFIG.STORAGE_KEYS.FEATURES, s.features);
+        safeGM_setValue(CONFIG.STORAGE_KEYS.PRESET, s.preset);
+        safeGM_setValue(CONFIG.STORAGE_KEYS.MAP_LAYER, s.mapLayer);
+        safeGM_setValue(CONFIG.STORAGE_KEYS.THEME, 'dark');
+        safeGM_setValue(CONFIG.STORAGE_KEYS.UI_SCALE, s.uiScale);
+        safeGM_setValue(CONFIG.STORAGE_KEYS.JITTER_DISTANCE, s.jitterDistance);
+        safeGM_setValue(CONFIG.STORAGE_KEYS.JITTER_UNIT, s.jitterUnit);
+        safeGM_setValue(CONFIG.STORAGE_KEYS.DISCORD_WEBHOOK, s.discordWebhook);
+        invalidateHotkeyCache();
+        return s;
+    }
+
+    function resetSettingsToDefaults(persist = true) {
+        const defaults = {
+            hotkeys: { ...CONFIG.DEFAULT_HOTKEYS },
+            features: { ...CONFIG.DEFAULT_FEATURES },
+            preset: CONFIG.DEFAULTS.PRESET,
+            mapLayer: CONFIG.DEFAULTS.MAP_LAYER,
+            themeMode: 'dark',
+            uiScale: CONFIG.DEFAULTS.UI_SCALE,
+            jitterDistance: CONFIG.DEFAULTS.JITTER_DISTANCE,
+            jitterUnit: CONFIG.DEFAULTS.JITTER_UNIT,
+            discordWebhook: ''
+        };
+
+        applySettingsToState(defaults);
+        if (persist) {
+            persistSettingsSnapshot(defaults);
+        }
+        return defaults;
+    }
+
+    // ========================================================================
+    // [SECTION 7-B] VERSION & INTEGRITY PROTECTION LAYER
+    // ========================================================================
+
+    const PROTECTION_OVERLAY_ID = 'btp-protection-overlay';
+    let integrityScheduledTimeout = null;
+    let lastRemoteFetchAt = 0;
+    let baselineFingerprints = null;
+
+    function fnv1aHash(input) {
+        let hash = 0x811c9dc5;
+        const str = String(input || '');
+        for (let i = 0; i < str.length; i++) {
+            hash ^= str.charCodeAt(i);
+            hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+        }
+        return ('00000000' + (hash >>> 0).toString(16)).slice(-8);
+    }
+
+    function compareSemanticVersion(a, b) {
+        const pa = String(a || '0.0.0').split('.').map(v => parseInt(v, 10) || 0);
+        const pb = String(b || '0.0.0').split('.').map(v => parseInt(v, 10) || 0);
+        const len = Math.max(pa.length, pb.length, 3);
+        for (let i = 0; i < len; i++) {
+            const va = pa[i] || 0;
+            const vb = pb[i] || 0;
+            if (va > vb) return 1;
+            if (va < vb) return -1;
+        }
+        return 0;
+    }
+
+    function bufferToHex(buffer) {
+        const bytes = new Uint8Array(buffer);
+        let hex = '';
+        for (let i = 0; i < bytes.length; i++) {
+            hex += bytes[i].toString(16).padStart(2, '0');
+        }
+        return hex;
+    }
+
+    async function generateScriptHash(sourceCode) {
+        try {
+            if (!sourceCode || typeof sourceCode !== 'string') return null;
+            if (typeof crypto === 'undefined' || !crypto.subtle || typeof TextEncoder === 'undefined') {
+                return null;
+            }
+            const data = new TextEncoder().encode(sourceCode);
+            const digest = await crypto.subtle.digest('SHA-256', data);
+            telemetryInc('protection.hashComputed');
+            return bufferToHex(digest);
+        } catch (e) {
+            Logger.debug('Hash generation failed:', e?.message || 'unknown');
+            return null;
+        }
+    }
+
+    function getLocalRuntimeSource() {
+
+        try {
+            if (typeof GM_info !== 'undefined') {
+
+                if (typeof GM_info.scriptSource === 'string' && GM_info.scriptSource.length > 100) {
+                    Logger.debug('[Integrity] Source from GM_info.scriptSource (' + GM_info.scriptSource.length + ' chars)');
+                    return GM_info.scriptSource;
+                }
+
+                if (typeof GM_info.script?.source === 'string' && GM_info.script.source.length > 100) {
+                    Logger.debug('[Integrity] Source from GM_info.script.source (' + GM_info.script.source.length + ' chars)');
+                    return GM_info.script.source;
+                }
+
+                if (typeof GM_info.script?.code === 'string' && GM_info.script.code.length > 100) {
+                    Logger.debug('[Integrity] Source from GM_info.script.code (' + GM_info.script.code.length + ' chars)');
+                    return GM_info.script.code;
+                }
+
+                if (typeof GM_info.scriptHandler === 'string') {
+                    Logger.debug('[Integrity] Handler:', GM_info.scriptHandler,
+                                 '| GM_info keys:', Object.keys(GM_info).join(','));
+                }
+                if (GM_info.script) {
+                    Logger.debug('[Integrity] GM_info.script keys:', Object.keys(GM_info.script).join(','));
+                }
+            } else {
+                Logger.debug('[Integrity] GM_info is undefined');
+            }
+        } catch (e) {
+            Logger.warn('[Integrity] GM_info extraction error:', e?.message);
+        }
+
+        try {
+            const scripts = document.querySelectorAll('script');
+            for (const script of scripts) {
+                const text = script.textContent || '';
+                if (text.length > 500 &&
+                    text.includes('Bintang Toba Pro') &&
+                    text.includes('__btp_initialized') &&
+                    text.includes('extractCoordinates')) {
+                    Logger.debug('[Integrity] Source from DOM <script> tag (' + text.length + ' chars)');
+                    return text;
+                }
+            }
+        } catch (e) {
+            Logger.debug('[Integrity] DOM script scan failed:', e?.message);
+        }
+
+        try {
+            const criticalFns = [
+                typeof extractCoordinatesLegacyImpl === 'function' ? extractCoordinatesLegacyImpl : null,
+                typeof handleKeydown === 'function' ? handleKeydown : null,
+                typeof togglePanel === 'function' ? togglePanel : null,
+                typeof updateInfoDisplay === 'function' ? updateInfoDisplay : null,
+                typeof showProtectionOverlay === 'function' ? showProtectionOverlay : null,
+                typeof guardProtectedUsage === 'function' ? guardProtectedUsage : null,
+                typeof startMonitoring === 'function' ? startMonitoring : null,
+                typeof createInfoDisplay === 'function' ? createInfoDisplay : null,
+                typeof sendToDiscord === 'function' ? sendToDiscord : null,
+                typeof placeGuessOnMap === 'function' ? placeGuessOnMap : null,
+                typeof refreshLocation === 'function' ? refreshLocation : null
+            ].filter(Boolean);
+
+            if (criticalFns.length >= 5) {
+                const composite = criticalFns.map(fn => fn.toString()).join('\n');
+                if (composite.length > 1000) {
+                    Logger.debug('[Integrity] Source from Function.toString() composite (' + composite.length + ' chars, ' + criticalFns.length + ' functions)');
+                    return composite;
+                }
+            }
+        } catch (e) {
+            Logger.debug('[Integrity] Function composite failed:', e?.message);
+        }
+
+        Logger.warn('[Integrity] ALL source extraction strategies FAILED');
+        return null;
+    }
+
+    async function getLocalRuntimeSourceAsync() {
+
+        const syncSource = getLocalRuntimeSource();
+        if (syncSource) return syncSource;
+
+        try {
+            if (typeof GM_info !== 'undefined' && GM_info.script?.downloadURL) {
+                const url = GM_info.script.downloadURL;
+                Logger.debug('[Integrity] Attempting self-fetch from downloadURL:', url);
+                const source = await new Promise((resolve, reject) => {
+                    if (typeof GM_xmlhttpRequest !== 'undefined') {
+                        GM_xmlhttpRequest({
+                            method: 'GET',
+                            url: url,
+                            timeout: 8000,
+                            onload: (res) => {
+                                if (res.status === 200 && res.responseText?.length > 500) {
+                                    resolve(res.responseText);
+                                } else {
+                                    reject(new Error('HTTP ' + res.status));
+                                }
+                            },
+                            onerror: () => reject(new Error('Network error')),
+                            ontimeout: () => reject(new Error('Timeout'))
+                        });
+                    } else {
+                        reject(new Error('GM_xmlhttpRequest unavailable'));
+                    }
+                });
+                Logger.debug('[Integrity] Source from self-fetch (' + source.length + ' chars)');
+                return source;
+            }
+        } catch (e) {
+            Logger.debug('[Integrity] Self-fetch failed:', e?.message);
+        }
+
+        return null;
+    }
+
+    async function fetchJsonWithTimeout(url, timeoutMs) {
+        return new Promise((resolve, reject) => {
+            const timeout = Math.max(1000, Number(timeoutMs) || CONFIG.TIMING.INTEGRITY_FETCH_TIMEOUT);
+
+            if (typeof GM_xmlhttpRequest !== 'undefined') {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url,
+                    headers: { 'Accept': 'application/json' },
+                    timeout,
+                    onload: (res) => {
+                        if (res.status >= 200 && res.status < 300) {
+                            try {
+                                resolve(JSON.parse(res.responseText));
+                            } catch (e) {
+                                reject(new Error('Invalid JSON response'));
+                            }
+                        } else {
+                            reject(new Error(`HTTP ${res.status}`));
+                        }
+                    },
+                    onerror: () => reject(new Error('Network error')),
+                    ontimeout: () => reject(new Error('Request timeout'))
+                });
+                return;
+            }
+
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeout);
+            fetch(url, { method: 'GET', headers: { 'Accept': 'application/json' }, signal: controller.signal })
+                .then((res) => {
+                clearTimeout(timer);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                return res.json();
+            })
+                .then(resolve)
+                .catch((e) => {
+                clearTimeout(timer);
+                reject(e);
+            });
+        });
+    }
+
+    async function loadRemoteVersionMetadata(forceRefresh = false) {
+        const now = Date.now();
+        const cache = safeGM_getValue(CONFIG.STORAGE_KEYS.REMOTE_VERSION_CACHE, null);
+
+        if (!forceRefresh && cache?.data && cache?.cachedAt && (now - cache.cachedAt) < CONFIG.TIMING.INTEGRITY_CACHE_TTL) {
+            Logger.debug('[Integrity] Using cached remote manifest (age:', Math.round((now - cache.cachedAt) / 1000) + 's)');
+            return cache.data;
+        }
+
+        if (!forceRefresh && (now - lastRemoteFetchAt) < CONFIG.TIMING.INTEGRITY_MIN_FETCH_GAP) {
+            Logger.debug('[Integrity] Remote fetch rate-limited, using cache');
+            return cache?.data || null;
+        }
+
+        lastRemoteFetchAt = now;
+        Logger.debug('[Integrity] Fetching remote manifest from:', CONFIG.VERSION_METADATA_URL);
+
+        try {
+            const data = await fetchJsonWithTimeout(CONFIG.VERSION_METADATA_URL, CONFIG.TIMING.INTEGRITY_FETCH_TIMEOUT);
+            const normalized = {
+                version: String(data?.version || ''),
+                hash: String(data?.hash || '').toLowerCase(),
+                force: !!data?.force,
+                message: String(data?.message || ''),
+                build: {
+                    channel: String(data?.build?.channel || 'stable'),
+                    timestamp: String(data?.build?.timestamp || ''),
+                    runtime: String(data?.build?.runtime || CONFIG.NAME),
+                    protection: !!data?.build?.protection
+                }
+            };
+
+            if (!normalized.version || normalized.version === '0.0.0') {
+                throw new Error('Invalid version manifest');
+            }
+
+            safeGM_setValue(CONFIG.STORAGE_KEYS.REMOTE_VERSION_CACHE, { cachedAt: now, data: normalized });
+            telemetryInc('protection.remoteFetchOk');
+            return normalized;
+        } catch (e) {
+            telemetryInc('protection.remoteFetchFail');
+            Logger.debug('Remote metadata fetch failed:', e?.message || 'unknown');
+            return cache?.data || null;
+        }
+    }
+
+    function buildProtectedFunctionFingerprint() {
+        return {
+            handleKeydown: fnv1aHash(handleKeydown?.toString?.() || ''),
+            togglePanel: fnv1aHash(togglePanel?.toString?.() || ''),
+            extractCoordinates: fnv1aHash(extractCoordinates?.toString?.() || ''),
+            updateInfoDisplay: fnv1aHash(updateInfoDisplay?.toString?.() || ''),
+            showOverlay: fnv1aHash(showProtectionOverlay?.toString?.() || ''),
+            guardUsage: fnv1aHash(guardProtectedUsage?.toString?.() || '')
+        };
+    }
+
+    function buildConfigProtectionFingerprint() {
+        const signature = [
+            CONFIG.NAME,
+            CONFIG.VERSION,
+            CONFIG.NOMINATIM_URL,
+            CONFIG.VERSION_METADATA_URL,
+            CONFIG.TIMING.INTEGRITY_CHECK_INTERVAL,
+            CONFIG.TIMING.INTEGRITY_HEARTBEAT_INTERVAL
+        ].join('|');
+        return fnv1aHash(signature);
+    }
+
+    function captureProtectionBaseline() {
+        baselineFingerprints = {
+            config: buildConfigProtectionFingerprint(),
+            functions: buildProtectedFunctionFingerprint()
+        };
+    }
+
+    function verifyRuntimeTamperSignals() {
+        const issues = [];
+        if (!baselineFingerprints) return issues;
+
+        if (buildConfigProtectionFingerprint() !== baselineFingerprints.config) {
+            issues.push('CONFIG fingerprint changed');
+        }
+
+        const currentFns = buildProtectedFunctionFingerprint();
+        for (const [name, baseline] of Object.entries(baselineFingerprints.functions)) {
+            if (currentFns[name] !== baseline) {
+                issues.push(`Function modified: ${name}`);
+            }
+        }
+
+        return issues;
+    }
+
+    function getGithubProjectUrl() {
+        return 'https://github.com/JD-YH03D/release';
+    }
+
+    function showProtectionOverlay(payload) {
+        const data = payload || {};
+        let root = document.getElementById(PROTECTION_OVERLAY_ID);
+
+        if (!root) {
+
+            if (!document.getElementById('btp-modern-overlay-styles')) {
+                const style = document.createElement('style');
+                style.id = 'btp-modern-overlay-styles';
+                style.textContent = `
+                @keyframes btpFadeIn {
+                    from { opacity: 0; }
+                    to { opacity: 1; }
+                }
+                @keyframes btpScaleIn {
+                    from { transform: scale(0.95); opacity: 0; }
+                    to { transform: scale(1); opacity: 1; }
+                }
+                .btp-btn-primary {
+                    flex: 1; min-width: 180px; padding: 14px 20px; border: none; border-radius: 12px;
+                    background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: #fff;
+                    font-weight: 600; font-size: 14px; cursor: pointer; transition: all 0.2s ease;
+                    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.2);
+                }
+                .btp-btn-primary:hover {
+                    background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+                    transform: translateY(-1px); box-shadow: 0 6px 16px rgba(37, 99, 235, 0.35);
+                }
+                .btp-btn-primary:active { transform: translateY(0); }
+
+                .btp-btn-secondary {
+                    flex: 1; min-width: 180px; padding: 14px 20px; border: 1px solid rgba(148, 163, 184, 0.15);
+                    border-radius: 12px; background: rgba(30, 41, 59, 0.5); color: #f1f5f9;
+                    font-weight: 600; font-size: 14px; cursor: pointer; transition: all 0.2s ease;
+                }
+                .btp-btn-secondary:hover {
+                    background: rgba(30, 41, 59, 0.8); border-color: rgba(148, 163, 184, 0.3);
+                    transform: translateY(-1px); color: #fff;
+                }
+                .btp-btn-secondary:active { transform: translateY(0); }
+            `;
+                document.head.appendChild(style);
+            }
+
+            root = document.createElement('div');
+            root.id = PROTECTION_OVERLAY_ID;
+            root.style.cssText = [
+                'position:fixed',
+                'inset:0',
+                'z-index:2147483646',
+                'display:flex',
+                'align-items:center',
+                'justify-content:center',
+                'background:rgba(8, 10, 19, 0.8)',
+                'backdrop-filter:blur(16px)',
+                '-webkit-backdrop-filter:blur(16px)',
+                'animation:btpFadeIn .3s cubic-bezier(0.16, 1, 0.3, 1)',
+                'padding:20px'
+            ].join(';');
+
+            root.innerHTML =
+                '<div style="width:min(580px,100%); background:linear-gradient(180deg, #0f1424 0%, #090d1a 100%); border:1px solid rgba(59, 130, 246, 0.2); border-radius:24px; box-shadow:0 30px 100px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.05); padding:32px; color:#f1f5f9; font-family:system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif; animation:btpScaleIn .4s cubic-bezier(0.16, 1, 0.3, 1); box-sizing:border-box;">' +
+                    '<div style="display:flex; align-items:flex-start; gap:16px; margin-bottom:24px;">' +
+                        '<div style="width:44px; height:44px; border-radius:14px; background:linear-gradient(135deg, #ef4444 0%, #b91c1c 100%); display:flex; align-items:center; justify-content:center; font-weight:800; color:#fff; font-size:20px; box-shadow:0 0 20px rgba(239, 68, 68, 0.3); flex-shrink:0;">' +
+                            '<svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>' +
+                        '</div>' +
+                        '<div style="flex:1;">' +
+                            '<div style="font-size:20px; font-weight:700; letter-spacing:-0.2px; color:#ffffff; margin-bottom:4px;">Bintang Toba Pro Integrity</div>' +
+                            '<div id="btp-protection-subtitle" style="font-size:13px; font-weight:500; color:#3b82f6; text-transform:uppercase; letter-spacing:0.5px;"></div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div id="btp-protection-reason" style="font-size:14px; line-height:1.6; color:#94a3b8; background:rgba(30, 41, 59, 0.3); border:1px solid rgba(255,255,255,0.03); padding:16px; border-radius:14px; margin-bottom:24px;"></div>' +
+                    '<div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:28px;">' +
+                        '<div style="background:rgba(15, 23, 42, 0.4); border:1px solid rgba(255, 255, 255, 0.04); border-radius:14px; padding:14px 16px;">' +
+                            '<div style="font-size:12px; color:#64748b; font-weight:500; margin-bottom:4px;">Current Version</div>' +
+                            '<div id="btp-protection-current" style="font-size:15px; font-weight:600; color:#f8fafc; font-family:monospace;"></div>' +
+                        '</div>' +
+                        '<div style="background:rgba(15, 23, 42, 0.4); border:1px solid rgba(255, 255, 255, 0.04); border-radius:14px; padding:14px 16px;">' +
+                            '<div style="font-size:12px; color:#64748b; font-weight:500; margin-bottom:4px;">Latest Official</div>' +
+                            '<div id="btp-protection-latest" style="font-size:15px; font-weight:600; color:#10b981; font-family:monospace;"></div>' +
+                        '</div>' +
+                        '<div style="background:rgba(15, 23, 42, 0.4); border:1px solid rgba(255, 255, 255, 0.04); border-radius:14px; padding:16px; grid-column:span 2;">' +
+                            '<div style="font-size:12px; color:#64748b; font-weight:500; margin-bottom:4px;">Integrity Status</div>' +
+                            '<div id="btp-protection-integrity" style="font-size:15px; font-weight:600; color:#f43f5e; margin-bottom:6px;"></div>' +
+                            '<div id="btp-protection-message" style="font-size:13px; color:#94a3b8; line-height:1.4;"></div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div style="display:flex; gap:12px; flex-wrap:wrap;">' +
+                        '<button id="btp-protection-update" class="btp-btn-primary">Update Official Build</button>' +
+                        '<button id="btp-protection-github" class="btp-btn-secondary">Open GitHub Source</button>' +
+                    '</div>' +
+                '</div>';
+
+            document.body.appendChild(root);
+            telemetryInc('protection.overlayShows');
+
+            const updateBtn = root.querySelector('#btp-protection-update');
+            if (updateBtn) {
+                updateBtn.onclick = () => {
+                    const url = 'https://update.greasyfork.org/scripts/578278/GeoGuessr%20-%20Let%27s%20explore%20the%20world%21.user.js';
+                    window.open(url, '_blank');
+                };
+            }
+
+            const githubBtn = root.querySelector('#btp-protection-github');
+            if (githubBtn) {
+                githubBtn.onclick = () => {
+                    window.open(getGithubProjectUrl(), '_blank');
+                };
+            }
+        }
+
+        const subtitle = root.querySelector('#btp-protection-subtitle');
+        const reason = root.querySelector('#btp-protection-reason');
+        const current = root.querySelector('#btp-protection-current');
+        const latest = root.querySelector('#btp-protection-latest');
+        const integrity = root.querySelector('#btp-protection-integrity');
+        const message = root.querySelector('#btp-protection-message');
+
+        if (subtitle) subtitle.textContent = data.forceUpdate ? 'Forced Update Required' : 'Runtime Integrity Warning';
+        if (reason) reason.textContent = data.reason || 'Integrity check detected a runtime mismatch.';
+        if (current) current.textContent = data.currentVersion || CONFIG.VERSION;
+        if (latest) latest.textContent = data.latestVersion || CONFIG.VERSION;
+        if (integrity) integrity.textContent = data.integrityStatus || 'Tampered / Modified';
+        if (message) message.textContent = data.message || 'Please use the official unmodified build from the repository to ensure proper functionality and security.';
+    }
+
+    function hideProtectionOverlay() {
+        document.getElementById(PROTECTION_OVERLAY_ID)?.remove();
+    }
+
+    function applyProtectionState(next) {
+        const current = state.runtime.protection || {};
+        state.runtime.protection = {
+            ...current,
+            ...next,
+            checkedAt: Date.now()
+        };
+
+        const p = state.runtime.protection;
+        Logger.debug('[Integrity] applyProtectionState:',
+                     'blocked=' + p.blocked,
+                     'modified=' + p.modifiedBuild,
+                     'outdated=' + p.outdated,
+                     'forceUpdate=' + p.forceUpdate);
+
+        if (p.modifiedBuild) {
+            state.runtime.degraded = true;
+            state.runtime.degradedReason = p.reason || 'Modified build detected';
+            telemetryInc('protection.modifiedDetected');
+            Logger.warn('[Integrity] 🔴 MODIFIED BUILD — runtime degraded');
+        }
+
+        if (p.outdated) {
+            telemetryInc('protection.outdatedDetected');
+            Logger.warn('[Integrity] 🟡 OUTDATED BUILD — local=' + p.currentVersion + ' remote=' + p.latestVersion);
+        }
+
+        if (p.forceUpdate) {
+            telemetryInc('protection.forceUpdateDetected');
+            Logger.warn('[Integrity] 🔴 FORCE UPDATE REQUIRED');
+        }
+
+        if (p.blocked) {
+            state.infoVisible = false;
+            state.miniMapVisible = false;
+            const panel = document.getElementById('geohelper-phone-frame');
+            if (panel) panel.style.display = 'none';
+            Logger.warn('[Integrity] 🚫 RUNTIME BLOCKED — all protected features disabled');
+        }
+
+        safeGM_setValue(CONFIG.STORAGE_KEYS.PROTECTION_STATE, p);
+
+        const shouldShow = !!(p.forceUpdate || p.modifiedBuild || p.outdated);
+
+        if (shouldShow) {
+            Logger.info('[Integrity] Showing protection overlay');
+            showProtectionOverlay({
+                forceUpdate: p.forceUpdate,
+                reason: p.reason,
+                currentVersion: p.currentVersion,
+                latestVersion: p.latestVersion,
+                message: p.message,
+                integrityStatus: p.modifiedBuild
+                ? 'MODIFIED BUILD DETECTED'
+                : (p.outdated ? 'OUTDATED BUILD DETECTED' : 'INTEGRITY WARNING')
+            });
+        } else {
+            hideProtectionOverlay();
+            Logger.debug('[Integrity] No overlay needed — state clean');
+        }
+    }
+
+    function isProtectionBlocked() {
+        return !!state.runtime?.protection?.blocked;
+    }
+
+    function guardProtectedUsage(actionName = 'feature') {
+        if (!isProtectionBlocked()) return true;
+        Logger.warn('[Integrity] 🚫 Action BLOCKED:', actionName);
+        telemetryInc('protection.blockedEvents');
+        showProtectionOverlay({
+            forceUpdate: !!state.runtime?.protection?.forceUpdate,
+            reason: `Action blocked: ${actionName}. ${state.runtime?.protection?.reason || 'Protection active.'}`,
+            currentVersion: state.runtime?.protection?.currentVersion || CONFIG.VERSION,
+            latestVersion: state.runtime?.protection?.latestVersion || CONFIG.VERSION,
+            message: state.runtime?.protection?.message || 'Please install the official build.',
+            integrityStatus: state.runtime?.protection?.forceUpdate
+            ? 'FORCED UPDATE REQUIRED'
+            : 'PROTECTED MODE ACTIVE'
+        });
+        return false;
+    }
+
+    const IntegrityManager = {
+        started: false,
+        checking: false,
+
+        async runCheck(reason = 'manual', forceRemote = false) {
+            if (this.checking) {
+                Logger.debug('[Integrity] runCheck skipped — already checking');
+                return;
+            }
+            this.checking = true;
+            telemetryInc('protection.checks');
+            Logger.info('[Integrity] ── CHECK START ── reason:', reason, '| forceRemote:', forceRemote);
+
+            try {
+
+                if (!baselineFingerprints) {
+                    captureProtectionBaseline();
+                    Logger.debug('[Integrity] Baseline fingerprints captured');
+                }
+
+                const runtimeIssues = verifyRuntimeTamperSignals();
+                if (runtimeIssues.length > 0) {
+                    Logger.warn('[Integrity] Runtime tamper signals:', runtimeIssues.join('; '));
+                } else {
+                    Logger.debug('[Integrity] Runtime tamper signals: CLEAN');
+                }
+
+                let localSource = getLocalRuntimeSource();
+                if (!localSource) {
+                    Logger.debug('[Integrity] Sync source extraction failed — trying async fallback...');
+                    localSource = await getLocalRuntimeSourceAsync();
+                }
+
+                let localHash = null;
+                const integrityCache = safeGM_getValue(CONFIG.STORAGE_KEYS.INTEGRITY_CACHE, null);
+
+                if (localSource) {
+                    localHash = await generateScriptHash(localSource);
+                    Logger.debug('[Integrity] Local hash generated:', localHash ? localHash.substring(0, 16) + '...' : 'FAILED',
+                                 '| source length:', localSource.length);
+                    if (localHash) {
+                        safeGM_setValue(CONFIG.STORAGE_KEYS.INTEGRITY_CACHE, {
+                            checkedAt: Date.now(),
+                            version: CONFIG.VERSION,
+                            hash: localHash,
+                            sourceLength: localSource.length
+                        });
+                    }
+                } else if (integrityCache?.version === CONFIG.VERSION && integrityCache?.hash) {
+                    localHash = integrityCache.hash;
+                    Logger.debug('[Integrity] Local hash from cache:', localHash.substring(0, 16) + '...');
+                } else {
+                    Logger.warn('[Integrity] ALL source extraction failed — hash-based detection unavailable');
+                    Logger.warn('[Integrity] Falling back to function-fingerprint-only detection');
+                }
+
+                Logger.debug('[Integrity] Fetching remote manifest...');
+                const remote = await loadRemoteVersionMetadata(forceRemote);
+
+                if (!remote) {
+                    Logger.warn('[Integrity] Remote manifest unavailable — skipping version/hash comparison');
+                    this.checking = false;
+                    return;
+                }
+
+                Logger.debug('[Integrity] Remote manifest loaded:',
+                             'version=' + (remote.version || '?'),
+                             '| hash=' + (remote.hash ? remote.hash.substring(0, 16) + '...' : 'EMPTY'),
+                             '| force=' + remote.force);
+
+                const latestVersion = remote.version || CONFIG.VERSION;
+                const versionCmp = compareSemanticVersion(latestVersion, CONFIG.VERSION);
+                const outdated = versionCmp > 0;
+                const forceUpdate = !!remote.force;
+
+                Logger.debug('[Integrity] Version compare: local=' + CONFIG.VERSION,
+                             'remote=' + latestVersion, 'outdated=' + outdated, 'forceUpdate=' + forceUpdate);
+
+                let hashMismatch = false;
+                const remoteHashPresent = !!(remote.hash && remote.hash.length > 8);
+                const localHashPresent = !!(localHash && localHash.length > 8);
+
+                if (localHashPresent && remoteHashPresent) {
+                    hashMismatch = String(localHash).toLowerCase() !== String(remote.hash).toLowerCase();
+                    Logger.info('[Integrity] Hash comparison:',
+                                hashMismatch ? '❌ MISMATCH' : '✅ MATCH',
+                                '| local=' + localHash.substring(0, 16) + '...',
+                                '| remote=' + remote.hash.substring(0, 16) + '...');
+                    if (hashMismatch) telemetryInc('protection.hashMismatch');
+                } else {
+                    Logger.debug('[Integrity] Hash comparison skipped:',
+                                 'localPresent=' + localHashPresent,
+                                 'remotePresent=' + remoteHashPresent);
+                }
+
+                const modifiedBuild = runtimeIssues.length > 0 || hashMismatch;
+                const blocked = forceUpdate || modifiedBuild;
+
+                const reasonText = modifiedBuild
+                ? (runtimeIssues[0] || 'Runtime hash mismatch with official build.')
+                : (forceUpdate
+                   ? 'Official build requires mandatory update.'
+                   : (outdated ? 'A newer official version is available.' : null));
+
+                Logger.info('[Integrity] ── VERDICT ──',
+                            'blocked=' + blocked,
+                            '| modified=' + modifiedBuild,
+                            '| outdated=' + outdated,
+                            '| forceUpdate=' + forceUpdate,
+                            '| reason=' + (reasonText || 'NONE'));
+
+                applyProtectionState({
+                    blocked,
+                    forceUpdate,
+                    modifiedBuild,
+                    outdated,
+                    reason: reasonText,
+                    message: remote.message || `Integrity check source: ${reason}`,
+                    localHash: localHash || null,
+                    remoteHash: remote.hash || null,
+                    currentVersion: CONFIG.VERSION,
+                    latestVersion,
+                    sourceAvailable: !!localSource
+                });
+
+                Logger.info('[Integrity] ── CHECK COMPLETE ──');
+
+            } catch (e) {
+                Logger.error('[Integrity] Check FAILED:', e?.message || 'unknown', e);
+            } finally {
+                this.checking = false;
+            }
+        },
+
+        scheduleSoon(reason = 'scheduled', delayMs = 1200) {
+            if (integrityScheduledTimeout) return;
+            integrityScheduledTimeout = setTimeout(() => {
+                integrityScheduledTimeout = null;
+                this.runCheck(reason, false);
+            }, Math.max(300, Number(delayMs) || 1200));
+        },
+
+        start() {
+            if (this.started) {
+                Logger.debug('[Integrity] start() skipped — already started');
+                return;
+            }
+            this.started = true;
+            Logger.info('[Integrity] ════════════════════════════════════');
+            Logger.info('[Integrity] PROTECTION SYSTEM STARTING');
+            Logger.info('[Integrity] ════════════════════════════════════');
+
+            captureProtectionBaseline();
+            Logger.debug('[Integrity] Baseline fingerprints captured at startup');
+
+            const cached = safeGM_getValue(CONFIG.STORAGE_KEYS.PROTECTION_STATE, null);
+            if (cached && typeof cached === 'object') {
+                Logger.debug('[Integrity] Restoring cached protection state:', cached.blocked ? 'BLOCKED' : 'OK');
+                state.runtime.protection = { ...state.runtime.protection, ...cached };
+                if (state.runtime.protection.blocked || state.runtime.protection.outdated) {
+                    applyProtectionState(state.runtime.protection);
+                }
+            } else {
+                Logger.debug('[Integrity] No cached protection state found');
+            }
+
+            Logger.debug('[Integrity] Scheduling startup check...');
+            this.runCheck('startup', true).then(() => {
+                Logger.info('[Integrity] Startup check completed');
+            }).catch((e) => {
+                Logger.error('[Integrity] Startup check failed:', e?.message);
+            });
+
+            integrityCheckInterval = setInterval(() => {
+                Logger.debug('[Integrity] Interval check triggered');
+                this.runCheck('interval', false);
+            }, CONFIG.TIMING.INTEGRITY_CHECK_INTERVAL);
+            Logger.debug('[Integrity] Interval check scheduled every', CONFIG.TIMING.INTEGRITY_CHECK_INTERVAL, 'ms');
+
+            integrityHeartbeatInterval = setInterval(() => {
+                const issues = verifyRuntimeTamperSignals();
+                if (issues.length > 0) {
+                    Logger.warn('[Integrity] Heartbeat detected tamper:', issues.join('; '));
+                    this.scheduleSoon('heartbeat_tamper', 400);
+                }
+            }, CONFIG.TIMING.INTEGRITY_HEARTBEAT_INTERVAL);
+            Logger.debug('[Integrity] Heartbeat scheduled every', CONFIG.TIMING.INTEGRITY_HEARTBEAT_INTERVAL, 'ms');
+
+            protectionErrorHandler = () => {
+                this.scheduleSoon('runtime_error', 800);
+            };
+            protectionRejectionHandler = () => {
+                this.scheduleSoon('runtime_rejection', 800);
+            };
+            window.addEventListener('error', protectionErrorHandler, true);
+            window.addEventListener('unhandledrejection', protectionRejectionHandler, true);
+
+            Logger.info('[Integrity] PROTECTION SYSTEM STARTED SUCCESSFULLY');
+        },
+
+        stop() {
+            Logger.debug('[Integrity] PROTECTION SYSTEM STOPPING');
+            this.started = false;
+            if (integrityCheckInterval) {
+                clearInterval(integrityCheckInterval);
+                integrityCheckInterval = null;
+            }
+            if (integrityHeartbeatInterval) {
+                clearInterval(integrityHeartbeatInterval);
+                integrityHeartbeatInterval = null;
+            }
+            if (integrityScheduledTimeout) {
+                clearTimeout(integrityScheduledTimeout);
+                integrityScheduledTimeout = null;
+            }
+
+            if (protectionErrorHandler) {
+                window.removeEventListener('error', protectionErrorHandler, true);
+                protectionErrorHandler = null;
+            }
+
+            if (protectionRejectionHandler) {
+                window.removeEventListener('unhandledrejection', protectionRejectionHandler, true);
+                protectionRejectionHandler = null;
+            }
+
+            hideProtectionOverlay();
+            Logger.debug('[Integrity] PROTECTION SYSTEM STOPPED');
+        }
+    };
+
+    // ========================================================================
+    // [SECTION 8] PLATFORM DETECTION
+    // ========================================================================
+
+    function detectPlatform() {
+        const url = window.location.href.toLowerCase();
+        const platforms = {
+            'geoguessr': 'geoguessr',
+            'worldguessr': 'worldguessr',
+            'openguessr': 'openguessr',
+            'freeguessr': 'freeguessr',
+            'guesswhereyouare': 'freeguessr',
+            'geoduel': 'geoduels'
+        };
+
+        for (const [keyword, platform] of Object.entries(platforms)) {
+            if (url.includes(keyword)) return platform;
+        }
+        return 'unknown';
+    }
+
+    // ========================================================================
+    // [SECTION 9] HOTKEY UTILITIES
+    // ========================================================================
+
+    function normalizeHotkey(key) {
+        return String(key || '').toLowerCase().trim();
+    }
+
+    function getHotkeys() {
+        const now = Date.now();
+        if (!hotkeyCache || (now - hotkeyCacheTime) > CONFIG.TIMING.HOTKEY_CACHE_TTL) {
+            hotkeyCache = safeGM_getValue(CONFIG.STORAGE_KEYS.HOTKEYS, { ...CONFIG.DEFAULT_HOTKEYS });
+
+            if (hotkeyCache.panel === 'Tab' || hotkeyCache.panel === 'tab') {
+                hotkeyCache.panel = 'Home';
+                safeGM_setValue(CONFIG.STORAGE_KEYS.HOTKEYS, hotkeyCache);
+            }
+
+            hotkeyCacheTime = now;
+        }
+        return hotkeyCache;
+    }
+
+    function invalidateHotkeyCache() {
+        hotkeyCache = null;
+        hotkeyCacheTime = 0;
+    }
+
+    function getHotkeyDescription(key) {
+        const descriptions = {
+            panel: 'Open settings panel',
+            marker: 'Place marker on map',
+            info: 'Show location info',
+            refresh: 'Refresh coordinates',
+            zoomIn: 'Zoom in mini map',
+            zoomOut: 'Zoom out mini map',
+            copyCoords: 'Copy coordinates',
+            googleMaps: 'Open in Google Maps',
+            discord: 'Send to Discord',
+            autoPlace: 'Auto place marker',
+            safePlace: 'Safe place (~50m)'
+        };
+        return descriptions[key] || '';
+    }
+
+    // ========================================================================
+    // [SECTION 10] PRESET & FEATURE UTILITIES
+    // ========================================================================
+
+    function detectPresetFromFeatures(features) {
+        const f = features || {};
+        for (const [name, preset] of Object.entries(CONFIG.PRESETS)) {
+            if (f.autoMarker === preset.autoMarker && f.safeMode === preset.safeMode) {
+                return name;
+            }
+        }
+        return 'custom';
+    }
+
+    function applyPresetMode(presetName, persist = false) {
+        const preset = CONFIG.PRESETS[presetName];
+        if (!preset) return;
+
+        state.features = { ...state.features, ...preset };
+        state.currentPreset = presetName;
+
+        setFeatureToggleUi();
+        setPresetButtonsUi();
+
+        if (persist) {
+            persistSettingsSnapshot({
+                features: state.features,
+                preset: state.currentPreset
+            });
+        }
+    }
+
+    // ========================================================================
+    // [SECTION 11] THEME & UI SCALE UTILITIES
+    // ========================================================================
+
+    function normalizeThemeMode(mode) {
+        return 'dark';
+    }
+
+    function applyThemeMode(themeMode, persist = false) {
+        state.themeMode = 'dark';
+        setThemeButtonsUi();
+
+        const panel = document.getElementById('geohelper-phone-frame');
+        if (panel) applyPhoneLikeButtonTheme(panel);
+
+        if (persist) {
+            persistSettingsSnapshot({ themeMode: 'dark' });
+        }
+    }
+
+    function applyUiScale(scaleMode, persist = false) {
+        const next = Validators.isValidUiScale(scaleMode) ? scaleMode : CONFIG.DEFAULTS.UI_SCALE;
+        state.uiScale = next;
+        setUiScaleButtonsUi();
+
+        const panel = document.getElementById('geohelper-phone-frame');
+        if (panel) applyPhoneLikeButtonTheme(panel);
+
+        if (persist) {
+            persistSettingsSnapshot({ uiScale: state.uiScale });
+        }
+    }
+
+    // ========================================================================
+    // [SECTION 12] MAP LAYER UTILITIES
+    // ========================================================================
+
+    function getMapLayerConfig(layerKey) {
+        return CONFIG.MAP_LAYERS[layerKey] || CONFIG.MAP_LAYERS[CONFIG.DEFAULTS.MAP_LAYER];
+    }
+
+    function applyMiniMapLayer(layerKey, persist = false) {
+        const resolved = Validators.isValidMapLayer(layerKey) ? layerKey : CONFIG.DEFAULTS.MAP_LAYER;
+        const conf = getMapLayerConfig(resolved);
+        state.currentMapLayer = resolved;
+
+        if (state.miniMap && typeof L !== 'undefined') {
+
+            if (state.miniMapTileLayer) {
+                try {
+                    state.miniMap.removeLayer(state.miniMapTileLayer);
+                } catch (e) {
+                    Logger.debug('Tile layer removal warning:', e.message);
+                }
+                state.miniMapTileLayer = null;
+            }
+
+            const layerOptions = {
+                maxZoom: 19,
+                worldCopyJump: true,
+                ...(conf.options || {})
+            };
+            state.miniMapTileLayer = L.tileLayer(conf.url, layerOptions);
+            state.miniMapTileLayer.addTo(state.miniMap);
+        }
+
+        setMapLayerButtonsUi();
+
+        const phone = document.getElementById('geohelper-phone-frame');
+        if (phone) applyPhoneLikeButtonTheme(phone);
+
+        if (persist) {
+            persistSettingsSnapshot({ mapLayer: state.currentMapLayer });
+        }
+    }
+
+    // ========================================================================
+    // [SECTION 13] UI STATE MANAGEMENT
+    // ========================================================================
+
+    function setFeatureToggleUi(container) {
+        const wrap = container || document.getElementById('geohelper-phone-frame') || state.panel;
+        if (!wrap) return;
+
+        const applyToggleDot = (slider, dot, isOn) => {
+            if (!slider || !dot) return;
+            const isCircleToggle = (slider.clientWidth || 0) <= 26;
+            if (isCircleToggle) {
+                dot.style.left = '50%';
+                dot.style.top = '50%';
+                dot.style.transform = 'translate(-50%, -50%)';
+                dot.style.opacity = isOn ? '1' : '0';
+                return;
+            }
+            const padding = 4;
+            const sliderW = slider.clientWidth || 48;
+            const dotW = dot.clientWidth || 18;
+            const travel = Math.max(0, sliderW - dotW - (padding * 2));
+            dot.style.left = isOn ? `${padding + travel}px` : `${padding}px`;
+            dot.style.top = '';
+            dot.style.transform = '';
+            dot.style.opacity = '1';
+        };
+
+        const updateToggle = (id, isOn) => {
+            const cb = wrap.querySelector(`#${id}`);
+            const slider = wrap.querySelector(`#${id}-slider`);
+            const dot = wrap.querySelector(`#${id}-dot`);
+
+            if (cb && slider && dot) {
+                cb.checked = isOn;
+                slider.style.backgroundColor = isOn ? '#2f7cf6' : '#2b313b';
+                slider.style.borderColor = isOn ? '#2f7cf6' : '#465062';
+                applyToggleDot(slider, dot, isOn);
+                dot.style.backgroundColor = isOn ? '#f8fafc' : '#9ca3af';
+            }
+        };
+
+        updateToggle('geohelper-auto-marker', !!state.features?.autoMarker);
+        updateToggle('geohelper-auto-pin', !!state.features?.autoPin);
+        updateToggle('geohelper-safe-mode', !!state.features?.safeMode);
+        setJitterControlsUi(wrap);
+    }
+
+    function setPresetButtonsUi(container) {
+        const wrap = container || document.getElementById('geohelper-phone-frame') || state.panel;
+        if (!wrap) return;
+
+        wrap.querySelectorAll('[data-preset]').forEach((btn) => {
+            const active = btn.dataset.preset === state.currentPreset;
+            btn.style.background = active ? '#2f7cf6' : '#1f232a';
+            btn.style.color = active ? '#f8fbff' : '#c9d1dc';
+            btn.style.borderColor = active ? '#2f7cf6' : '#3c4350';
+            btn.style.borderWidth = '2px';
+            btn.style.borderStyle = 'solid';
+        });
+
+        const label = wrap.querySelector('#geohelper-preset-status');
+        if (label) label.textContent = `Mode: ${state.currentPreset.toUpperCase()}`;
+    }
+
+    function setThemeButtonsUi() {
+        state.themeMode = 'dark';
+    }
+
+    function setUiScaleButtonsUi(container) {
+        const wrap = container || document.getElementById('geohelper-phone-frame') || state.panel;
+        if (!wrap) return;
+
+        const isCompact = state.uiScale === 'compact';
+
+        const cb = wrap.querySelector('#geohelper-ui-scale');
+        const slider = wrap.querySelector('#geohelper-ui-scale-slider');
+        const dot = wrap.querySelector('#geohelper-ui-scale-dot');
+
+        if (cb && slider && dot) {
+            cb.checked = isCompact;
+            slider.style.backgroundColor = isCompact ? '#2f7cf6' : '#2b313b';
+            slider.style.borderColor = isCompact ? '#2f7cf6' : '#465062';
+            const isCircleToggle = (slider.clientWidth || 0) <= 26;
+            if (isCircleToggle) {
+                dot.style.left = '50%';
+                dot.style.top = '50%';
+                dot.style.transform = 'translate(-50%, -50%)';
+                dot.style.opacity = isCompact ? '1' : '0';
+            } else {
+                const padding = 4;
+                const sliderW = slider.clientWidth || 48;
+                const dotW = dot.clientWidth || 18;
+                const travel = Math.max(0, sliderW - dotW - (padding * 2));
+                dot.style.left = isCompact ? `${padding + travel}px` : `${padding}px`;
+                dot.style.top = '';
+                dot.style.transform = '';
+                dot.style.opacity = '1';
+            }
+            dot.style.backgroundColor = isCompact ? '#f8fafc' : '#9ca3af';
+        }
+
+        const label = wrap.querySelector('#geohelper-scale-status');
+        if (label) label.textContent = `SCALE: ${(state.uiScale || CONFIG.DEFAULTS.UI_SCALE).toUpperCase()}`;
+    }
+
+    function setJitterControlsUi(container) {
+        const wrap = container || document.getElementById('geohelper-phone-frame') || state.panel;
+        if (!wrap) return;
+
+        const jitterBox = wrap.querySelector('#geohelper-jitter-controls-box');
+        const jitterRange = wrap.querySelector('#geohelper-jitter-range');
+        const jitterUnit = wrap.querySelector('#geohelper-jitter-unit');
+        const jitterLabel = wrap.querySelector('#geohelper-jitter-label');
+
+        if (!jitterRange || !jitterUnit || !jitterLabel) return;
+
+        state.jitterUnit = normalizeJitterUnit(state.jitterUnit);
+        state.jitterDistance = normalizeJitterDistance(state.jitterDistance, state.jitterUnit);
+
+        jitterUnit.value = state.jitterUnit;
+        jitterRange.min = '0';
+        jitterRange.max = '10000';
+        jitterRange.step = state.jitterUnit === 'km' ? '5' : '50';
+        jitterRange.value = String(state.jitterDistance);
+
+        const unitLabel = state.jitterUnit === 'km' ? 'km' : 'm';
+        jitterLabel.textContent = `Batas Acak: 0 - ${Number(state.jitterDistance).toLocaleString('en-US')} ${unitLabel}`;
+
+        if (jitterBox) {
+            const enabled = !!state.features?.safeMode;
+            jitterBox.style.display = enabled ? 'block' : 'none';
+            jitterBox.style.opacity = enabled ? '1' : '0';
+            jitterBox.style.pointerEvents = enabled ? 'auto' : 'none';
+            jitterBox.style.maxHeight = enabled ? '140px' : '0px';
+            jitterBox.style.marginTop = enabled ? '10px' : '0px';
+            jitterBox.style.padding = enabled ? '12px' : '0';
+            jitterBox.style.borderWidth = enabled ? '1px' : '0px';
+            jitterBox.style.overflow = 'hidden';
+        }
+    }
+
+    function setMapLayerButtonsUi(container) {
+        const wrap = container || document.getElementById('geohelper-maps-view') ||
+              document.getElementById('geohelper-phone-frame') || state.panel;
+        if (!wrap) return;
+
+        const darkMode = true;
+
+        wrap.querySelectorAll('[data-map-layer]').forEach((btn) => {
+            const layerName = btn.dataset.mapLayer;
+            const isActive = layerName === state.currentMapLayer;
+            const indicator = btn.querySelector(`.layer-indicator-${layerName}`);
+            const circle = indicator?.parentElement;
+
+            if (circle && indicator) {
+                circle.style.borderColor = isActive ? (darkMode ? '#2f7cf6' : '#1a73e8') : (darkMode ? '#4b5563' : '#e5e7eb');
+                indicator.style.background = isActive ? (darkMode ? '#2f7cf6' : '#1a73e8') : 'transparent';
+            }
+
+            const textSpan = btn.querySelector('span');
+            if (textSpan) {
+                textSpan.style.color = isActive ? (darkMode ? '#7eb2ff' : '#1a73e8') : (darkMode ? '#c9d1dc' : '#1f2937');
+                textSpan.style.fontWeight = isActive ? '600' : '500';
+            }
+        });
+
+        document.querySelectorAll('#geohelper-maplayer-status').forEach((label) => {
+            const conf = getMapLayerConfig(state.currentMapLayer);
+            label.textContent = `LAYER: ${conf.name.toUpperCase()}`;
+        });
+    }
+
+    // ========================================================================
+    // [SECTION 14] COORDINATE EXTRACTION
+    // ========================================================================
+
+    function getInterceptedCoords() {
+        if (Validators.isValidCoord(interceptedCoords.lat, interceptedCoords.lng)) {
+            return { lat: interceptedCoords.lat, lng: interceptedCoords.lng };
+        }
+        return null;
+    }
+
+    function walkFiber(fiber, depth = 0) {
+        if (!fiber || depth > CONFIG.LIMITS.FIBER_WALK_MAX_DEPTH) return null;
+
+        try {
+            const props = fiber.memoizedProps;
+            if (props) {
+                if (props.panorama?.location?.latLng) return props.panorama;
+                if (props.streetView?.location?.latLng) return props.streetView;
+                if (props.children?.props?.panorama?.location?.latLng) return props.children.props.panorama;
+            }
+
+            const queue = fiber.updateQueue;
+            if (queue?.lastEffect) {
+                let effect = queue.lastEffect;
+                const seen = new Set();
+                do {
+                    if (seen.has(effect)) break;
+                    seen.add(effect);
+                    if (effect.deps) {
+                        for (const dep of effect.deps) {
+                            if (dep?.location?.latLng) return dep;
+                        }
+                    }
+                    effect = effect.next;
+                } while (effect && effect !== queue.lastEffect);
+            }
+
+            const fromSibling = walkFiber(fiber.sibling, depth + 1);
+            if (fromSibling) return fromSibling;
+
+            const fromReturn = walkFiber(fiber.return, depth + 1);
+            if (fromReturn) return fromReturn;
+
+        } catch (e) {
+
+        }
+        return null;
+    }
+
+    function extractFromGoogleSV() {
+        try {
+            const canvases = document.querySelectorAll('.widget-scene-canvas, canvas[class*="scene"]');
+            for (const canvas of canvases) {
+                let el = canvas;
+                for (let i = 0; i < 10 && el; i++) {
+                    el = el.parentElement;
+                    if (!el) break;
+                    const fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber'));
+                    if (fiberKey) {
+                        const sv = walkFiber(el[fiberKey], 0);
+                        if (sv?.location?.latLng) {
+                            const lat = typeof sv.location.latLng.lat === 'function'
+                            ? sv.location.latLng.lat() : sv.location.latLng.lat;
+                            const lng = typeof sv.location.latLng.lng === 'function'
+                            ? sv.location.latLng.lng() : sv.location.latLng.lng;
+                            if (Validators.isValidCoord(lat, lng)) return { lat, lng };
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+
+        }
+        return null;
+    }
+
+    function extractFromIframes() {
+        const iframes = document.querySelectorAll('iframe');
+        for (const iframe of iframes) {
+            const src = iframe.src || iframe.getAttribute('data-src') || '';
+            if (!src || src.length < 10) continue;
+
+            try {
+                const baseUrl = src.startsWith('http') ? src : window.location.origin + src;
+                const url = new URL(baseUrl);
+
+                const paramPatterns = [
+                    { key: 'location', separator: ',' },
+                    { key: 'cbll', separator: ',' },
+                    { key: 'viewpoint', separator: ',' },
+                    { keys: ['lat', 'lng'] },
+                    { keys: ['lat', 'lon'] }
+                ];
+
+                for (const pattern of paramPatterns) {
+                    if (pattern.key) {
+                        const value = url.searchParams.get(pattern.key);
+                        if (value) {
+                            const parts = value.split(pattern.separator);
+                            if (parts.length >= 2) {
+                                const lat = parseFloat(parts[0]);
+                                const lng = parseFloat(parts[1]);
+                                if (Validators.isValidCoord(lat, lng)) {
+                                    return { lat, lng };
+                                }
+                            }
+                        }
+                    } else if (pattern.keys) {
+                        const lat = parseFloat(url.searchParams.get(pattern.keys[0]));
+                        const lng = parseFloat(url.searchParams.get(pattern.keys[1]));
+                        if (Validators.isValidCoord(lat, lng)) {
+                            return { lat, lng };
+                        }
+                    }
+                }
+            } catch (e) {
+                continue;
+            }
+        }
+        return null;
+    }
+
+    // ========================================================================
+    // [SECTION 14-B] EXTRACTOR REGISTRY (PHASE 1 SHADOW MODE)
+    // ========================================================================
+
+    let shadowExtractionTick = 0;
+
+    function areCoordsEquivalent(a, b) {
+        if (!a && !b) return true;
+        if (!a || !b) return false;
+        if (!Validators.isValidCoord(a.lat, a.lng) || !Validators.isValidCoord(b.lat, b.lng)) return false;
+        return Math.abs(a.lat - b.lat) < 0.000001 && Math.abs(a.lng - b.lng) < 0.000001;
+    }
+
+    const ExtractorRegistry = {
+        _initialized: false,
+        _strategies: [],
+        _health: Object.create(null),
+
+        register(name, runFn) {
+            this._strategies.push({ name, run: runFn });
+            if (!this._health[name]) {
+                this._health[name] = {
+                    attempts: 0,
+                    success: 0,
+                    nulls: 0,
+                    mismatches: 0,
+                    totalMs: 0,
+                    avgMs: 0,
+                    lastMs: 0,
+                    lastOkAt: 0,
+                    lastNullAt: 0
+                };
+            }
+        },
+
+        initDefaults() {
+            if (this._initialized) return;
+            this._initialized = true;
+
+            this.register('shadow_xhr_intercept', () => getInterceptedCoords());
+            this.register('shadow_iframe', () => extractFromIframes());
+            this.register('shadow_google_sv', () => extractFromGoogleSV());
+
+            this.register('shadow_url_params', () => {
+                const params = new URLSearchParams(window.location.search);
+                const lat = parseFloat(params.get('lat'));
+                const lng = parseFloat(params.get('lng') || params.get('lon'));
+                return Validators.isValidCoord(lat, lng) ? { lat, lng } : null;
+            });
+
+            this.register('shadow_global_vars', () => {
+                try {
+                    const safeWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+                    const c1 = safeWin?.__gameState?.coords;
+                    if (c1 && Validators.isValidCoord(c1.lat, c1.lng)) {
+                        return { lat: c1.lat, lng: c1.lng };
+                    }
+                    const c2 = safeWin?.gameCoordinates;
+                    if (c2 && Validators.isValidCoord(c2.lat, c2.lng)) {
+                        return { lat: c2.lat, lng: c2.lng };
+                    }
+                } catch (e) {
+
+                }
+                return null;
+            });
+        },
+
+        runShadowAgainst(liveResult) {
+            if (!state.runtime?.flags?.ENABLE_SHADOW_EXTRACTION_TELEMETRY) return;
+
+            shadowExtractionTick++;
+            if ((shadowExtractionTick % 5) !== 0) return;
+
+            this.initDefaults();
+            telemetryInc('extraction.shadowRuns');
+
+            setTimeout(() => {
+                for (const strategy of this._strategies) {
+                    const started = (typeof performance !== 'undefined' && performance.now)
+                    ? performance.now()
+                    : Date.now();
+
+                    let result = null;
+                    try {
+                        result = strategy.run();
+                    } catch (e) {
+                        result = null;
+                    }
+
+                    const ended = (typeof performance !== 'undefined' && performance.now)
+                    ? performance.now()
+                    : Date.now();
+                    const ms = Math.max(0, ended - started);
+                    const ok = !!(result && Validators.isValidCoord(result.lat, result.lng));
+
+                    telemetryTime(strategy.name, ms, ok);
+
+                    const h = this._health[strategy.name];
+                    h.attempts++;
+                    h.lastMs = ms;
+                    h.totalMs += ms;
+                    h.avgMs = h.attempts ? +(h.totalMs / h.attempts).toFixed(3) : 0;
+
+                    if (ok) {
+                        h.success++;
+                        h.lastOkAt = Date.now();
+                    } else {
+                        h.nulls++;
+                        h.lastNullAt = Date.now();
+                        telemetryInc(`extraction.strategy.${strategy.name}.nulls`);
+                    }
+
+                    if (!areCoordsEquivalent(liveResult, result)) {
+                        h.mismatches++;
+                        telemetryInc('extraction.shadowMismatches');
+                        telemetryInc(`extraction.strategy.${strategy.name}.mismatch`);
+                    }
+                }
+            }, 0);
+        },
+
+        getHealthSnapshot() {
+            try {
+                return JSON.parse(JSON.stringify(this._health));
+            } catch (e) {
+                return {};
+            }
+        }
+    };
+
+    function extractCoordinatesLegacyImpl() {
+
+        const cached = extractionCache.get();
+        if (cached) return cached;
+
+        try {
+
+            const fromXHR = getInterceptedCoords();
+            if (fromXHR) {
+                extractionCache.set(fromXHR, 'xhr');
+                return fromXHR;
+            }
+
+            if (state.platform === 'geoguessr') {
+                const panorama = document.querySelector(
+                    'div[data-qa="panorama"], [data-qa="street-view"], [class*="panorama"], [class*="streetview"]'
+                );
+                if (panorama) {
+                    const fiberKey = Object.keys(panorama).find(k => k.startsWith('__reactFiber'));
+                    if (fiberKey) {
+                        const fiber = panorama[fiberKey];
+
+                        const paths = [
+                            fiber.return?.return?.return?.sibling?.memoizedProps?.panorama,
+                            fiber.return?.return?.return?.return?.sibling?.memoizedProps?.panorama,
+                            fiber.return?.updateQueue?.lastEffect?.deps?.[0],
+                            fiber.return?.return?.updateQueue?.lastEffect?.deps?.[0],
+                            fiber.child?.memoizedProps?.panorama,
+                            fiber.return?.memoizedProps?.panorama,
+                        ];
+
+                        for (const sv of paths) {
+                            if (sv?.location?.latLng) {
+                                const lat = typeof sv.location.latLng.lat === 'function'
+                                ? sv.location.latLng.lat() : sv.location.latLng.lat;
+                                const lng = typeof sv.location.latLng.lng === 'function'
+                                ? sv.location.latLng.lng() : sv.location.latLng.lng;
+                                if (Validators.isValidCoord(lat, lng)) {
+                                    const r = { lat, lng };
+                                    extractionCache.set(r, 'fiber-path');
+                                    return r;
+                                }
+                            }
+                        }
+
+                        const sv = walkFiber(fiber, 0);
+                        if (sv?.location?.latLng) {
+                            const lat = typeof sv.location.latLng.lat === 'function'
+                            ? sv.location.latLng.lat() : sv.location.latLng.lat;
+                            const lng = typeof sv.location.latLng.lng === 'function'
+                            ? sv.location.latLng.lng() : sv.location.latLng.lng;
+                            if (Validators.isValidCoord(lat, lng)) {
+                                const r = { lat, lng };
+                                extractionCache.set(r, 'fiber-walk');
+                                return r;
+                            }
+                        }
+                    }
+                }
+
+                const fromSV = extractFromGoogleSV();
+                if (fromSV) {
+                    extractionCache.set(fromSV, 'sv-canvas-geo');
+                    return fromSV;
+                }
+            }
+
+            const fromIframe = extractFromIframes();
+            if (fromIframe) {
+                extractionCache.set(fromIframe, 'iframe');
+                return fromIframe;
+            }
+
+            const freeGuessrSelectors = [
+                '.iframeWithStreetView',
+                '[class*="streetview"]',
+                '[class*="panorama"]',
+                '[data-testid*="street"]',
+                '[id*="streetview"]'
+            ];
+
+            for (const selector of freeGuessrSelectors) {
+                const el = document.querySelector(selector);
+                if (!el) continue;
+                const fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber'));
+                if (!fiberKey) continue;
+
+                const fiber = el[fiberKey];
+
+                const latLong = fiber.return?.memoizedProps?.latLong
+                || fiber.return?.return?.memoizedProps?.latLong
+                || fiber.memoizedProps?.latLong;
+
+                if (Array.isArray(latLong) && latLong.length === 2) {
+                    const [lat, lng] = latLong;
+                    if (Validators.isValidCoord(lat, lng)) {
+                        const r = { lat, lng };
+                        extractionCache.set(r, 'fiber-latLong');
+                        return r;
+                    }
+                }
+
+                const coordinates = fiber.return?.memoizedProps?.coordinates
+                || fiber.return?.return?.memoizedProps?.coordinates;
+
+                if (coordinates) {
+                    const lat = coordinates.lat || coordinates.latitude;
+                    const lng = coordinates.lng || coordinates.lon || coordinates.longitude;
+                    if (Validators.isValidCoord(lat, lng)) {
+                        const r = { lat, lng };
+                        extractionCache.set(r, 'fiber-coordinates');
+                        return r;
+                    }
+                }
+            }
+
+            if (state.platform !== 'geoguessr') {
+                const fromSV = extractFromGoogleSV();
+                if (fromSV) {
+                    extractionCache.set(fromSV, 'sv-canvas');
+                    return fromSV;
+                }
+            }
+
+            const urlParams = new URLSearchParams(window.location.search);
+            const lat = urlParams.get('lat');
+            const lng = urlParams.get('lng') || urlParams.get('lon');
+            if (lat && lng) {
+                const parsedLat = parseFloat(lat);
+                const parsedLng = parseFloat(lng);
+                if (Validators.isValidCoord(parsedLat, parsedLng)) {
+                    const r = { lat: parsedLat, lng: parsedLng };
+                    extractionCache.set(r, 'url-params');
+                    return r;
+                }
+            }
+
+            try {
+                const safeWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+                if (safeWin.__gameState?.coords) {
+                    const c = safeWin.__gameState.coords;
+                    if (Validators.isValidCoord(c.lat, c.lng)) {
+                        const r = { lat: c.lat, lng: c.lng };
+                        extractionCache.set(r, 'global-gameState');
+                        return r;
+                    }
+                }
+                if (safeWin.gameCoordinates) {
+                    const c = safeWin.gameCoordinates;
+                    if (Validators.isValidCoord(c.lat, c.lng)) {
+                        const r = { lat: c.lat, lng: c.lng };
+                        extractionCache.set(r, 'global-gameCoordinates');
+                        return r;
+                    }
+                }
+            } catch (e) {
+
+            }
+
+        } catch (e) {
+            Logger.error('Extract error:', e);
+        }
+
+        const now = Date.now();
+        if (now - lastExtractLog > CONFIG.TIMING.EXTRACT_LOG_INTERVAL) {
+            lastExtractLog = now;
+            Logger.debug('No coordinates found (platform:', state.platform, ')');
+        }
+
+        return null;
+    }
+
+    function extractCoordinates() {
+        const live = extractCoordinatesLegacyImpl();
+        ExtractorRegistry.runShadowAgainst(live);
+        return live;
+    }
+
+    // ========================================================================
+    // [SECTION 15] ADDRESS LOOKUP
+    // ========================================================================
+
+    async function lookupAddress(lat, lng) {
+        return new Promise((resolve, reject) => {
+            if (!Validators.isValidCoord(lat, lng)) {
+                reject(new Error('Invalid coordinates'));
+                return;
+            }
+
+            while (addressQueue.length >= CONFIG.LIMITS.ADDRESS_QUEUE_MAX) {
+                const stale = addressQueue.shift();
+                stale.reject(new Error('Queue overflow - stale request dropped'));
+            }
+
+            addressQueue.push({ lat, lng, resolve, reject });
+            processAddressQueue();
+        });
+    }
+
+    let addressBackoffMs = 0; // exponential backoff on repeated failures
+    let addressConsecutiveErrors = 0;
+    const ADDRESS_MAX_BACKOFF = 30000; // max 30s wait after repeated failures
+
+    function processAddressQueue() {
+        if (addressProcessing || addressQueue.length === 0) return;
+
+        const now = Date.now();
+        const minInterval = state.platform === 'geoguessr'
+        ? CONFIG.TIMING.ADDRESS_RATE_LIMIT_GEOGUESSR
+        : CONFIG.TIMING.ADDRESS_RATE_LIMIT_DEFAULT;
+        const effectiveInterval = Math.max(minInterval, addressBackoffMs);
+        const elapsed = now - lastAddressCall;
+
+        if (elapsed >= effectiveInterval) {
+            addressProcessing = true;
+            const { lat, lng, resolve, reject } = addressQueue.shift();
+
+            const url = `${CONFIG.NOMINATIM_URL}?lat=${lat}&lon=${lng}&format=json&accept-language=en`;
+            const nominatimUserAgent = `GeoGuessrAMAS/${CONFIG.VERSION} (contact: github.com/JD-YH03D/release)`;
+
+            const handleResponse = (data) => {
+                lastAddressCall = Date.now();
+                addressProcessing = false;
+                addressConsecutiveErrors = 0;
+                addressBackoffMs = 0; // reset backoff on success
+                resolve(data);
+                setTimeout(processAddressQueue, minInterval);
+            };
+
+            const handleError = (error, statusCode) => {
+                lastAddressCall = Date.now();
+                addressProcessing = false;
+                addressConsecutiveErrors++;
+
+                if (statusCode === 429 || addressConsecutiveErrors >= 2) {
+                    addressBackoffMs = Math.min(
+                        ADDRESS_MAX_BACKOFF,
+                        Math.max(2000, addressBackoffMs * 2 || 2000)
+                    );
+                    Logger.warn(`Address API throttled - backing off ${(addressBackoffMs / 1000).toFixed(0)}s`);
+                }
+
+                reject(error);
+                setTimeout(processAddressQueue, Math.max(minInterval, addressBackoffMs));
+            };
+
+            if (typeof GM_xmlhttpRequest !== 'undefined') {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url: url,
+                    headers: {
+                        'Accept': 'application/json',
+                        'User-Agent': nominatimUserAgent
+                    },
+                    timeout: 10000, // BUG FIX: prevent hanging requests
+                    onload: (res) => {
+                        if (res.status === 200) {
+                            try {
+                                handleResponse(JSON.parse(res.responseText));
+                            } catch (e) {
+                                handleError(e, res.status);
+                            }
+                        } else {
+                            handleError(new Error(`HTTP ${res.status}`), res.status);
+                        }
+                    },
+                    onerror: (e) => handleError(e, 0),
+                    ontimeout: () => handleError(new Error('Request timeout'), 0)
+                });
+            } else {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+                fetch(url, {
+                    headers: {
+                        'Accept': 'application/json',
+                        'User-Agent': nominatimUserAgent
+                    },
+                    signal: controller.signal
+                })
+                    .then(res => {
+                    clearTimeout(timeoutId);
+                    if (res.ok) return res.json();
+                    throw { message: `HTTP ${res.status}`, status: res.status };
+                })
+                    .then(handleResponse)
+                    .catch((e) => {
+                    clearTimeout(timeoutId);
+                    handleError(e, e?.status || 0);
+                });
+            }
+        } else {
+            setTimeout(processAddressQueue, effectiveInterval - elapsed);
+        }
+    }
+
+    function formatAddress(addr) {
+        if (!addr?.address) return null;
+        const a = addr.address;
+        const parts = [
+            a.road || a.street,
+            a.city || a.town || a.village,
+            a.state || a.province,
+            a.country
+        ].filter(Boolean);
+        return parts.join(', ') || a.country || 'Unknown';
+    }
+
+    function buildHistoryAddressLabel(addressObj) {
+        return formatAddress(addressObj) || 'Unknown location';
+    }
+
+    function isSameCoords(a, b, epsilon = 0.000001) {
+        if (!a || !b) return false;
+        if (!Validators.isValidCoord(a.lat, a.lng) || !Validators.isValidCoord(b.lat, b.lng)) return false;
+        return Math.abs(a.lat - b.lat) <= epsilon && Math.abs(a.lng - b.lng) <= epsilon;
+    }
+
+    function applyAddressIfCurrent(expectedCoords, addressObj) {
+        if (!expectedCoords || !Validators.isValidCoord(expectedCoords.lat, expectedCoords.lng)) return false;
+        const current = state.coords;
+        if (!isSameCoords(current, expectedCoords, 0.00001)) {
+            telemetryInc('async.addressDiscardedStale');
+            return false;
+        }
+        state.address = addressObj;
+        return true;
+    }
+
+    function syncLatestHistoryAddress(coords, addressObj) {
+        const latest = state.roundHistory[0];
+        if (!latest) return;
+        if (!isSameCoords({ lat: latest.lat, lng: latest.lng }, coords, 0.00001)) return;
+        latest.address = buildHistoryAddressLabel(addressObj);
+    }
+
+    // ========================================================================
+    // [SECTION 16] ROUND HISTORY MANAGEMENT
+    // ========================================================================
+
+    function addRoundHistoryEntry(coords, addressObj = null) {
+        if (!coords || !Validators.isValidCoord(coords.lat, coords.lng)) return;
+
+        const lastEntry = state.roundHistory[0] || null;
+        if (lastEntry) {
+            const veryClose = Math.abs(lastEntry.lat - coords.lat) < 0.00001 &&
+                  Math.abs(lastEntry.lng - coords.lng) < 0.00001;
+            if (veryClose) return;
+        }
+
+        const nextRoundNumber = (state.roundHistory[0]?.round || 0) + 1;
+        const entry = {
+            round: nextRoundNumber,
+            lat: coords.lat,
+            lng: coords.lng,
+            address: buildHistoryAddressLabel(addressObj),
+            timestamp: Date.now()
+        };
+
+        state.roundHistory.unshift(entry);
+        if (state.roundHistory.length > CONFIG.LIMITS.HISTORY_MAX_ITEMS) {
+            state.roundHistory.length = CONFIG.LIMITS.HISTORY_MAX_ITEMS;
+        }
+    }
+
+    function normalizeImportedHistory(rawRounds) {
+        if (!Array.isArray(rawRounds)) return [];
+
+        const cleaned = rawRounds
+        .map((item, idx) => {
+            const lat = Number(item?.lat);
+            const lng = Number(item?.lng);
+            if (!Validators.isValidCoord(lat, lng)) return null;
+
+            const tsRaw = item?.timestamp;
+            const ts = Number.isFinite(Number(tsRaw))
+            ? Number(tsRaw)
+            : Date.now() - ((rawRounds.length - idx) * 1000);
+
+            return {
+                round: Number.isFinite(Number(item?.round)) ? Number(item.round) : idx + 1,
+                lat,
+                lng,
+                address: String(item?.address || 'Unknown location'),
+                timestamp: ts
+            };
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.timestamp - a.timestamp)
+        .slice(0, CONFIG.LIMITS.HISTORY_MAX_ITEMS);
+
+        return normalizeRoundSequence(cleaned);
+    }
+
+    function normalizeRoundSequence(history) {
+        return history.map((entry, idx, arr) => ({
+            ...entry,
+            round: arr.length - idx
+        }));
+    }
+
+    function mergeRoundHistory(existing, imported) {
+        const combined = [...existing, ...imported].sort((a, b) => b.timestamp - a.timestamp);
+
+        const seen = new Set();
+        const deduped = [];
+        for (const entry of combined) {
+            const key = `${entry.lat.toFixed(6)}|${entry.lng.toFixed(6)}|${Math.floor(entry.timestamp / 1000)}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            deduped.push(entry);
+            if (deduped.length >= CONFIG.LIMITS.HISTORY_MAX_ITEMS) break;
+        }
+        return normalizeRoundSequence(deduped);
+    }
+
+    function refreshHistoryView() {
+        const historyList = document.getElementById('geohelper-history-list');
+        const historyCount = document.getElementById('geohelper-history-count');
+
+        if (!historyList) return;
+
+        const count = state.roundHistory?.length || 0;
+        if (historyCount) {
+            historyCount.textContent = `${count} round${count !== 1 ? 's' : ''}`;
+        }
+
+        const signature = getHistoryRenderSignature();
+        if (uiRenderCache.historySignature === signature && historyList.children.length > 0) {
+            return;
+        }
+        uiRenderCache.historySignature = signature;
+
+        if (count === 0) {
+            historyList.innerHTML = buildHistoryEmptyStateHtml();
+            return;
+        }
+
+        const cards = state.roundHistory.map((entry) => buildHistoryEntryCardHtml(entry)).join('');
+        const html = buildHistoryActionRowsHtml() +
+            '<div style="display:flex;flex-direction:column;gap:10px;">' + cards + '</div>';
+
+        historyList.innerHTML = html;
+
+        bindRoundHistoryActions(historyList);
+
+        historyList.querySelectorAll('[data-copy-entry]').forEach(btn => {
+            btn.onclick = () => {
+                const roundNum = parseInt(btn.dataset.copyEntry);
+                const entry = state.roundHistory.find(e => e.round === roundNum);
+                if (entry) {
+                    navigator.clipboard.writeText(`${entry.lat.toFixed(6)}, ${entry.lng.toFixed(6)}`).then(() => {
+                        btn.textContent = '✓';
+                        setTimeout(() => { btn.textContent = '📋'; }, 1000);
+                    });
+                }
+            };
+        });
+    }
+
+    function renderRoundHistoryHtml() {
+        const hasRows = Array.isArray(state.roundHistory) && state.roundHistory.length > 0;
+
+        const rows = hasRows
+            ? buildRoundHistoryRowsHtml(state.roundHistory)
+            : '<div style="padding:10px 12px;border:1px dashed #d1d5db;border-radius:10px;background:#fff;color:#6b7280;font-size:12px;">No round history yet. Play or import a session.</div>';
+
+        return '<div style="margin-top:12px;">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">' +
+                '<div style="font-size:12px;color:#6b7280;font-weight:700;text-transform:uppercase;letter-spacing:.5px;">Round History</div>' +
+                buildRoundHistoryHeaderActionsHtml() +
+            '</div>' +
+            '<div>' + rows + '</div>' +
+        '</div>';
+    }
+
+    // ========================================================================
+    // [SECTION 17] FILE EXPORT/IMPORT UTILITIES
+    // ========================================================================
+
+    function downloadTextFile(filename, content, mime = 'text/plain;charset=utf-8') {
+        try {
+            const blob = new Blob([content], { type: mime });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        } catch (e) {
+            Logger.error('Download failed:', e.message);
+        }
+    }
+
+    function exportRoundHistory(format = 'json') {
+        if (!state.roundHistory.length) return;
+        const dateKey = new Date().toISOString().replace(/[:.]/g, '-');
+
+        if (format === 'csv') {
+            const header = 'round,timestamp_iso,lat,lng,address';
+            const rows = state.roundHistory.map((e) => {
+                const address = `"${String(e.address || '').replace(/"/g, '""')}"`;
+                return `${e.round},${new Date(e.timestamp).toISOString()},${e.lat.toFixed(6)},${e.lng.toFixed(6)},${address}`;
+            });
+            downloadTextFile(`bintang-history-${dateKey}.csv`, [header, ...rows].join('\n'), 'text/csv;charset=utf-8');
+            return;
+        }
+
+        const payload = {
+            exportedAt: new Date().toISOString(),
+            platform: state.platform,
+            total: state.roundHistory.length,
+            rounds: state.roundHistory
+        };
+        downloadTextFile(`bintang-history-${dateKey}.json`, JSON.stringify(payload, null, 2), 'application/json;charset=utf-8');
+    }
+
+    function buildSessionSnapshot() {
+        return {
+            exportedAt: new Date().toISOString(),
+            app: CONFIG.NAME,
+            version: CONFIG.VERSION,
+            platform: state.platform,
+            settings: {
+                hotkeys: { ...(getHotkeys() || CONFIG.DEFAULT_HOTKEYS) },
+                features: { ...(state.features || CONFIG.DEFAULT_FEATURES) },
+                preset: state.currentPreset || detectPresetFromFeatures(state.features),
+                mapLayer: state.currentMapLayer || CONFIG.DEFAULTS.MAP_LAYER,
+                themeMode: state.themeMode || CONFIG.DEFAULTS.THEME,
+                uiScale: state.uiScale || CONFIG.DEFAULTS.UI_SCALE,
+                discordWebhook: safeGM_getValue(CONFIG.STORAGE_KEYS.DISCORD_WEBHOOK, '')
+            },
+            history: Array.isArray(state.roundHistory) ? state.roundHistory.map((e) => ({ ...e })) : []
+        };
+    }
+
+    function exportFullSessionBackup() {
+        const snapshot = buildSessionSnapshot();
+        const dateKey = new Date().toISOString().replace(/[:.]/g, '-');
+        downloadTextFile(
+            `bintang-session-backup-${dateKey}.json`,
+            JSON.stringify(snapshot, null, 2),
+            'application/json;charset=utf-8'
+        );
+    }
+
+    function importSessionBackupFromJsonText(text) {
+        try {
+            const parsed = JSON.parse(text);
+            const settings = parsed?.settings || {};
+
+            const importOverrides = {};
+            if (settings.hotkeys && typeof settings.hotkeys === 'object') importOverrides.hotkeys = settings.hotkeys;
+            if (settings.features && typeof settings.features === 'object') importOverrides.features = settings.features;
+            if (settings.preset) importOverrides.preset = settings.preset;
+            if (settings.mapLayer) importOverrides.mapLayer = settings.mapLayer;
+            if (settings.uiScale) importOverrides.uiScale = settings.uiScale;
+            if (typeof settings.discordWebhook === 'string') importOverrides.discordWebhook = settings.discordWebhook.trim();
+
+            const importedSettings = getCurrentSettingsSnapshot(importOverrides);
+
+            persistSettingsSnapshot(importedSettings);
+            applySettingsToState(importedSettings);
+            applyMiniMapLayer(state.currentMapLayer, false);
+            applyThemeMode('dark', false);
+            applyUiScale(state.uiScale, false);
+
+            const importedHistory = normalizeImportedHistory(parsed?.history || parsed?.rounds || []);
+            if (importedHistory.length) {
+                state.lastImportBackup = state.roundHistory.map((e) => ({ ...e }));
+                state.roundHistory = normalizeRoundSequence(importedHistory);
+            }
+
+            syncPanelSettingsUiFromState();
+            if (state.infoVisible) updateInfoDisplay();
+            Logger.info('Session backup imported successfully');
+        } catch (e) {
+            alert('Session import failed: invalid backup file.');
+            Logger.error('Session import error:', e.message);
+        }
+    }
+
+    function importRoundHistoryFromJsonText(text, mode = 'replace') {
+        try {
+            const parsed = JSON.parse(text);
+            const rounds = Array.isArray(parsed) ? parsed : parsed?.rounds;
+            const normalized = normalizeImportedHistory(rounds);
+
+            if (!normalized.length) {
+                alert('Import failed: no valid round entries in file.');
+                return;
+            }
+
+            state.lastImportBackup = state.roundHistory.map((e) => ({ ...e }));
+
+            if (mode === 'merge') {
+                state.roundHistory = mergeRoundHistory(state.roundHistory, normalized);
+            } else {
+                state.roundHistory = normalizeRoundSequence(normalized.slice(0, CONFIG.LIMITS.HISTORY_MAX_ITEMS));
+            }
+
+            if (state.infoVisible) {
+                updateInfoDisplay();
+            }
+            Logger.info('History imported:', normalized.length, 'entries', '| mode:', mode);
+        } catch (e) {
+            alert('Import failed: invalid JSON file.');
+            Logger.error('Import JSON error:', e.message);
+        }
+    }
+
+    function pickAndImportSessionBackupFile() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json,application/json';
+        input.style.display = 'none';
+        input.onchange = async () => {
+            const file = input.files?.[0];
+            if (!file) return;
+            try {
+                const text = await file.text();
+                importSessionBackupFromJsonText(text);
+            } catch (e) {
+                alert('Session import failed: unable to read file.');
+            }
+        };
+        document.body.appendChild(input);
+        input.click();
+        setTimeout(() => input.remove(), 0);
+    }
+
+    function pickAndImportHistoryFile(mode = 'replace') {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json,application/json';
+        input.style.display = 'none';
+        input.onchange = async () => {
+            const file = input.files?.[0];
+            if (!file) return;
+            try {
+                const text = await file.text();
+                importRoundHistoryFromJsonText(text, mode);
+            } catch (e) {
+                alert('Import failed: unable to read file.');
+            }
+        };
+        document.body.appendChild(input);
+        input.click();
+        setTimeout(() => input.remove(), 0);
+    }
+
+    function bindRoundHistoryActions(container) {
+        if (!container) return;
+
+        const actions = {
+            'copy-latest': Throttle.createHandler('history_copy_latest', CONFIG.COOLDOWNS.HISTORY_COPY, () => {
+                const latest = state.roundHistory[0];
+                if (!latest) return;
+                const text = `Round ${latest.round}: ${latest.lat.toFixed(6)}, ${latest.lng.toFixed(6)} | ${latest.address}`;
+                navigator.clipboard.writeText(text).then(() => {
+                    const btn = container.querySelector('[data-history-action="copy-latest"]');
+                    if (btn) {
+                        btn.textContent = 'Copied';
+                        setTimeout(() => { btn.textContent = 'Copy Latest'; }, 900);
+                    }
+                }).catch(() => Logger.debug('History copy latest failed'));
+            }),
+
+            'copy-all': Throttle.createHandler('history_copy_all', CONFIG.COOLDOWNS.HISTORY_EXPORT, () => {
+                if (!state.roundHistory.length) return;
+                const text = state.roundHistory.map((e) =>
+                                                    `Round ${e.round}: ${e.lat.toFixed(6)}, ${e.lng.toFixed(6)} | ${e.address}`
+                ).join('\n');
+                navigator.clipboard.writeText(text).then(() => {
+                    const btn = container.querySelector('[data-history-action="copy-all"]');
+                    if (btn) {
+                        btn.textContent = 'Copied';
+                        setTimeout(() => { btn.textContent = 'Copy All'; }, 900);
+                    }
+                }).catch(() => Logger.debug('History copy all failed'));
+            }),
+
+            'export-json': Throttle.createHandler('history_export_json', CONFIG.COOLDOWNS.HISTORY_EXPORT, () => {
+                exportRoundHistory('json');
+            }),
+
+            'export-csv': Throttle.createHandler('history_export_csv', CONFIG.COOLDOWNS.HISTORY_EXPORT, () => {
+                exportRoundHistory('csv');
+            }),
+
+            'import-json': Throttle.createHandler('history_import_json', CONFIG.COOLDOWNS.HISTORY_EXPORT, () => {
+                const merge = window.confirm('Import mode:\nOK = Merge with existing history\nCancel = Replace existing history');
+                pickAndImportHistoryFile(merge ? 'merge' : 'replace');
+            }),
+
+            'undo-import': Throttle.createHandler('history_undo_import', CONFIG.COOLDOWNS.HISTORY_COPY, () => {
+                if (!state.lastImportBackup) return;
+                state.roundHistory = state.lastImportBackup.map((e) => ({ ...e }));
+                state.lastImportBackup = null;
+                if (state.infoVisible) updateInfoDisplay();
+                Logger.info('History undo applied');
+            })
+        };
+
+        for (const [action, handler] of Object.entries(actions)) {
+            const btn = container.querySelector(`[data-history-action="${action}"]`);
+            if (btn) btn.onclick = handler;
+        }
+    }
+
+    function syncPanelSettingsUiFromState() {
+        const panel = document.getElementById('geohelper-phone-frame') || state.panel;
+        if (!panel) return;
+
+        const hotkeys = getHotkeys() || CONFIG.DEFAULT_HOTKEYS;
+        panel.querySelectorAll('[data-hotkey]').forEach((input) => {
+            const key = input.dataset.hotkey;
+            input.value = hotkeys[key] || CONFIG.DEFAULT_HOTKEYS[key];
+        });
+
+        const webhookEl = panel.querySelector('#geohelper-discord-webhook');
+        if (webhookEl) webhookEl.value = safeGM_getValue(CONFIG.STORAGE_KEYS.DISCORD_WEBHOOK, '');
+
+        setFeatureToggleUi(panel);
+        setPresetButtonsUi(panel);
+        setThemeButtonsUi(panel);
+        setUiScaleButtonsUi(panel);
+        setJitterControlsUi(panel);
+        setMapLayerButtonsUi(panel);
+        applyPhoneLikeButtonTheme(panel);
+    }
+
+    // ========================================================================
+    // [SECTION 18] MARKER PLACEMENT
+    // ========================================================================
+
+    let streetViewService = null;
+
+    function getJitterDistanceMeters(distance, unit) {
+        const normalizedUnit = normalizeJitterUnit(unit);
+        const normalizedDistance = normalizeJitterDistance(distance, normalizedUnit);
+        return normalizedUnit === 'km' ? normalizedDistance * 1000 : normalizedDistance;
+    }
+
+    async function getNearestStreetView(coords, maxRadiusMeters) {
+        if (!Validators.isValidCoord(coords?.lat, coords?.lng)) return null;
+        if (typeof google === 'undefined' || !google.maps || !google.maps.StreetViewService) return null;
+
+        if (!streetViewService) {
+            streetViewService = new google.maps.StreetViewService();
+        }
+
+        const request = {
+            location: new google.maps.LatLng(coords.lat, coords.lng),
+            radius: Math.max(50, Math.round(Number(maxRadiusMeters) || 150)),
+            source: google.maps.StreetViewSource?.OUTDOOR || undefined
+        };
+
+        return new Promise((resolve) => {
+            try {
+                streetViewService.getPanorama(request, (data, status) => {
+                    if (status === google.maps.StreetViewStatus.OK && data?.location?.latLng) {
+                        const latLng = data.location.latLng;
+                        const lat = typeof latLng.lat === 'function' ? latLng.lat() : latLng.lat;
+                        const lng = typeof latLng.lng === 'function' ? latLng.lng() : latLng.lng;
+                        if (Validators.isValidCoord(lat, lng)) {
+                            resolve({ lat, lng });
+                            return;
+                        }
+                    }
+                    resolve(null);
+                });
+            } catch (e) {
+                resolve(null);
+            }
+        });
+    }
+
+    async function generateSafeLandCoordinate(originalCoords, maxDistance, unit) {
+        if (!Validators.isValidCoord(originalCoords?.lat, originalCoords?.lng)) {
+            return originalCoords;
+        }
+
+        const maxDistanceMeters = getJitterDistanceMeters(maxDistance, unit);
+        if (maxDistanceMeters <= 0) {
+            return originalCoords;
+        }
+
+        updateStatusText('Checking land...', '#fbbf24');
+        updateLedIndicator('refreshing');
+
+        let fallback = null;
+        const earthRadiusMeters = 6378137;
+        const DEG2RAD = Math.PI / 180;
+        const RAD2DEG = 180 / Math.PI;
+
+        // Scale attempts & search radius based on jitter magnitude
+        const maxAttempts = maxDistanceMeters > 100000 ? 16 : (maxDistanceMeters > 50000 ? 12 : (maxDistanceMeters > 5000 ? 8 : 5));
+        const svSearchRadius = Math.min(50000, Math.max(150, maxDistanceMeters * 0.5));
+        const minDistanceMeters = maxDistanceMeters >= 10000
+            ? Math.min(maxDistanceMeters * 0.6, Math.max(1000, maxDistanceMeters * 0.05))
+            : 0;
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            const angle = Math.random() * 2 * Math.PI;
+            // Bounded random with outward weight to avoid repeatedly selecting near-zero offsets.
+            const distanceMeters = minDistanceMeters +
+                (Math.sqrt(Math.random()) * (maxDistanceMeters - minDistanceMeters));
+
+            // Spherical offset using Haversine-based forward projection
+            const baseLat = originalCoords.lat;
+            const baseLng = originalCoords.lng;
+            const baseLatRad = baseLat * DEG2RAD;
+            const cosBaseLat = Math.max(0.01, Math.cos(baseLatRad));
+
+            const dLatRad = (distanceMeters * Math.cos(angle)) / earthRadiusMeters;
+            const dLngRad = (distanceMeters * Math.sin(angle)) / (earthRadiusMeters * cosBaseLat);
+
+            // Compute raw candidate coordinates
+            let candidateLat = baseLat + (dLatRad * RAD2DEG);
+            let candidateLng = baseLng + (dLngRad * RAD2DEG);
+
+            // FIX: Clamp latitude to valid playable range (-85..85) to avoid polar distortion
+            candidateLat = Math.max(-85, Math.min(85, candidateLat));
+
+            // FIX: Wrap longitude to -180..180 range (handles dateline crossings)
+            candidateLng = ((candidateLng + 540) % 360) - 180;
+
+            const candidate = { lat: candidateLat, lng: candidateLng };
+
+            if (!Validators.isValidCoord(candidate.lat, candidate.lng)) continue;
+            fallback = candidate; // Always track latest valid random candidate
+
+            Logger.debug('🎲 Jitter attempt', attempt + 1, ':', candidate.lat.toFixed(4), candidate.lng.toFixed(4),
+                         '| dist:', Math.round(distanceMeters / 1000) + 'km');
+
+            // Try to snap to nearest StreetView (guarantees land placement)
+            const snapped = await getNearestStreetView(candidate, svSearchRadius);
+            if (snapped && Validators.isValidCoord(snapped.lat, snapped.lng)) {
+                updateStatusText('Ready', '#4ade80');
+                updateLedIndicator('ready');
+                Logger.info('🎯 Safe land coordinate found (attempt ' + (attempt + 1) + '):',
+                            snapped.lat.toFixed(6), snapped.lng.toFixed(6));
+                return snapped;
+            }
+        }
+
+        updateStatusText('Ready', '#4ade80');
+        updateLedIndicator('ready');
+
+        // Return last valid random candidate as fallback (no StreetView snap available)
+        if (fallback) {
+            Logger.info('🎯 Jitter fallback (no StreetView):', fallback.lat.toFixed(6), fallback.lng.toFixed(6));
+            return fallback;
+        }
+
+        // Ultimate safety net: should never reach here
+        Logger.warn('🎯 Jitter: all attempts produced invalid coords, returning original');
+        return originalCoords;
+    }
+
+    async function applySafeMode(coords) {
+        if (!state.features?.safeMode) {
+            return coords;
+        }
+
+        return generateSafeLandCoordinate(coords, state.jitterDistance, state.jitterUnit);
+    }
+
+    async function toggleMarker(forceCoords = null) {
+        const coords = forceCoords || extractCoordinates();
+        if (!coords || !Validators.isValidCoord(coords.lat, coords.lng)) {
+            Logger.debug('No valid coordinates');
+            return false;
+        }
+
+        const finalCoords = await applySafeMode(coords);
+
+        if (state.marker) {
+            try {
+                if (typeof google !== 'undefined' && google.maps && state.marker.setMap) {
+                    state.marker.setMap(null);
+                } else if (typeof L !== 'undefined' && state.gameMap) {
+                    state.gameMap.removeLayer(state.marker);
+                }
+            } catch (e) {
+                Logger.debug('Marker removal error:', e.message);
+            }
+            state.marker = null;
+            Logger.debug('Marker removed');
+            return false;
+        }
+
+        if (typeof google !== 'undefined' && google.maps && state.gameMap) {
+            state.marker = new google.maps.Marker({
+                position: new google.maps.LatLng(finalCoords.lat, finalCoords.lng),
+                map: state.gameMap,
+                icon: {
+                    path: google.maps.SymbolPath.CIRCLE,
+                    scale: 8,
+                    fillColor: '#ff4444',
+                    fillOpacity: 1,
+                    strokeColor: '#ffffff',
+                    strokeWeight: 2
+                }
+            });
+            Logger.debug('Marker added (Google Maps)', state.features?.safeMode ? '[Safe Mode]' : '[Exact]');
+            return true;
+        }
+
+        if (typeof L !== 'undefined' && state.gameMap) {
+            state.marker = L.marker([finalCoords.lat, finalCoords.lng]).addTo(state.gameMap);
+            Logger.debug('Marker added (Leaflet)', state.features?.safeMode ? '[Safe Mode]' : '[Exact]');
+            return true;
+        }
+
+        Logger.debug('No map available');
+        return false;
+    }
+
+    async function autoPlaceMarker() {
+        if (!state.features?.autoMarker) return;
+        if (state.markerPlacedThisRound) return;
+
+        const coords = extractCoordinates();
+        if (!coords || !Validators.isValidCoord(coords.lat, coords.lng)) return;
+
+        if (state.features?.autoPin) {
+            const ok = await placeGuessOnMap(!!state.features?.safeMode);
+            if (ok) state.markerPlacedThisRound = true;
+            return;
+        }
+
+        const finalCoords = await applySafeMode(coords);
+
+        if (state.marker) {
+            try {
+                if (typeof google !== 'undefined' && google.maps && state.marker.setPosition) {
+                    state.marker.setPosition(new google.maps.LatLng(finalCoords.lat, finalCoords.lng));
+                } else if (typeof L !== 'undefined' && state.marker.setLatLng) {
+                    state.marker.setLatLng([finalCoords.lat, finalCoords.lng]);
+                }
+                state.markerPlacedThisRound = true;
+            } catch (e) {
+                Logger.debug('Auto marker update failed:', e.message);
+            }
+            return;
+        }
+
+        if (!state.gameMap) findMapInstance();
+
+        if (typeof google !== 'undefined' && google.maps && state.gameMap) {
+            state.marker = new google.maps.Marker({
+                position: new google.maps.LatLng(finalCoords.lat, finalCoords.lng),
+                map: state.gameMap,
+                icon: {
+                    path: google.maps.SymbolPath.CIRCLE,
+                    scale: 8,
+                    fillColor: '#ff4444',
+                    fillOpacity: 1,
+                    strokeColor: '#ffffff',
+                    strokeWeight: 2
+                }
+            });
+            state.markerPlacedThisRound = true;
+            updateStatusText('Auto Marked', '#4ade80');
+            return;
+        }
+
+        if (typeof L !== 'undefined' && state.gameMap) {
+            state.marker = L.marker([finalCoords.lat, finalCoords.lng]).addTo(state.gameMap);
+            state.markerPlacedThisRound = true;
+            updateStatusText('Auto Marked', '#4ade80');
+        }
+    }
+
+    // ========================================================================
+    // [SECTION 18-B] GAME MAP PIN ENGINE
+    // ========================================================================
+
+    function resolveGoogleMapFromFiber(domNode, maxDepth = 8) {
+        if (!domNode) return null;
+
+        const fiberKey = Object.keys(domNode).find(k =>
+                                                   k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$')
+                                                  );
+        if (!fiberKey) return null;
+
+        let fiber = domNode[fiberKey];
+
+        for (let depth = 0; fiber && depth < maxDepth; depth++) {
+            try {
+                const props = fiber.memoizedProps;
+                if (props?.map && typeof props.map === 'object') {
+
+                    if (props.map.__e3_ || props.map.getCenter || props.map.setCenter) {
+                        return props.map;
+                    }
+                }
+
+                if (fiber.stateNode?.map && fiber.stateNode.map.__e3_) {
+                    return fiber.stateNode.map;
+                }
+            } catch (_) { /* guard against sealed props */ }
+
+            fiber = fiber.return;
+        }
+
+        return null;
+    }
+
+    function buildSyntheticMapEvent(lat, lng) {
+        return {
+            latLng: {
+                lat: () => lat,
+                lng: () => lng,
+                toJSON: () => ({ lat, lng }),
+                toString: () => `(${lat}, ${lng})`
+            },
+            stop: null,
+            pixel: null // some handlers look at pixel, null is safe
+        };
+    }
+
+    function dispatchToClickListeners(mapInst, syntheticEvent) {
+
+        const registryKeys = ['__e3_', '__listeners_', 'gm_bindings_'];
+        let invoked = false;
+
+        for (const regKey of registryKeys) {
+            const registry = mapInst[regKey];
+            if (!registry || typeof registry !== 'object') continue;
+
+            const clickBucket = registry.click;
+            if (!clickBucket || typeof clickBucket !== 'object') continue;
+
+            const bucketKeys = Object.keys(clickBucket);
+            for (let i = bucketKeys.length - 1; i >= 0; i--) {
+                const entry = clickBucket[bucketKeys[i]];
+                if (!entry || typeof entry !== 'object') continue;
+
+                const fnKeys = Object.keys(entry);
+                for (const fk of fnKeys) {
+                    if (typeof entry[fk] === 'function') {
+                        try {
+                            entry[fk](syntheticEvent);
+                            invoked = true;
+                            Logger.debug(`dispatchToClickListeners: invoked handler [${regKey}][${bucketKeys[i]}][${fk}]`);
+                        } catch (err) {
+                            Logger.debug('dispatchToClickListeners: handler threw', err.message);
+                        }
+                    }
+                }
+            }
+
+            if (invoked) break; // one registry is enough
+        }
+
+        return invoked;
+    }
+
+    function locateGuessMapNode() {
+        const candidates = [
+
+            '[class^="guess-map_canvas"]',
+            '[class*="guess-map_canvas"]',
+            '[data-qa="guess-map"] [class*="canvas"]',
+
+            '[class*="region-map_mapCanvas"]',
+            '[class*="region-map_canvas"]',
+
+            '[class*="map_canvas__"]',
+            '[class*="mapCanvas__"]'
+        ];
+
+        for (const sel of candidates) {
+            const nodes = document.querySelectorAll(sel);
+            for (const node of nodes) {
+                const r = node.getBoundingClientRect();
+                if (r.width > 30 && r.height > 30) return node;
+            }
+        }
+
+        return null;
+    }
+
+    function pinGuessToGameMap(lat, lng) {
+
+        const mapNode = locateGuessMapNode();
+        if (!mapNode) {
+            Logger.debug('pinGuessToGameMap: guess-map node not found');
+            return false;
+        }
+
+        const gMapInst = resolveGoogleMapFromFiber(mapNode, 10);
+        if (!gMapInst) {
+            Logger.debug('pinGuessToGameMap: Google Maps instance not found in Fiber');
+            return false;
+        }
+
+        const synEvent = buildSyntheticMapEvent(lat, lng);
+
+        const ok = dispatchToClickListeners(gMapInst, synEvent);
+
+        if (ok) {
+            Logger.debug('pinGuessToGameMap: successfully dispatched at', lat.toFixed(6), lng.toFixed(6));
+        } else {
+            Logger.debug('pinGuessToGameMap: no click listeners accepted the event');
+        }
+
+        return ok;
+    }
+
+    function jitterCoordinates(lat, lng) {
+        const maxR = CONFIG.MAP.SAFE_MODE_OFFSET_DEGREES;
+
+        const angle = Math.random() * 2 * Math.PI;
+        const radius = maxR * Math.sqrt(Math.random());
+        return {
+            lat: lat + radius * Math.cos(angle),
+            lng: lng + radius * Math.sin(angle)
+        };
+    }
+
+    async function placeGuessOnMap(withJitter = false) {
+        if (!guardProtectedUsage('Place Guess')) return false;
+        if (!state.features?.autoPin) {
+            updateStatusText('Auto Pin OFF', '#f59e0b');
+            Logger.debug('placeGuessOnMap blocked: autoPin is OFF');
+            return false;
+        }
+
+        const raw = extractCoordinates();
+        if (!raw || !Validators.isValidCoord(raw.lat, raw.lng)) {
+            updateStatusText('No coords', '#ef4444');
+            return false;
+        }
+
+        const target = withJitter
+            ? await generateSafeLandCoordinate(raw, state.jitterDistance, state.jitterUnit)
+            : raw;
+
+        if (withJitter) {
+            Logger.info('🎲 Safe jitter config:',
+                        Number(state.jitterDistance),
+                        state.jitterUnit,
+                        '| from:', raw.lat.toFixed(6), raw.lng.toFixed(6),
+                        '| to:', target.lat.toFixed(6), target.lng.toFixed(6));
+        }
+
+        const ok = pinGuessToGameMap(target.lat, target.lng);
+
+        if (ok) {
+            state.markerPlacedThisRound = true;
+            updateStatusText(withJitter ? 'Safe Pinned!' : 'Pinned!', '#4ade80');
+            updateLedIndicator('ready');
+            Logger.info('📌 Guess pinned on game map',
+                        withJitter ? '(jittered)' : '(exact)',
+                        target.lat.toFixed(6), target.lng.toFixed(6));
+        } else {
+            updateStatusText('Pin failed', '#ef4444');
+            Logger.warn('placeGuessOnMap: could not pin guess');
+        }
+
+        return ok;
+    }
+
+    function findMapInstance() {
+        try {
+            const selectors = [
+                "[class*='guess-map_canvas']",
+                '.leaflet-container',
+                "[class*='mapCanvas']",
+                "[class*='map-canvas']",
+                "[data-qa*='map']",
+                "[id*='map']"
+            ];
+
+            const containers = document.querySelectorAll(selectors.join(', '));
+
+            for (const container of containers) {
+                const fiberKey = Object.keys(container).find(k => k.startsWith('__reactFiber'));
+                if (fiberKey) {
+                    const fiber = container[fiberKey];
+                    state.gameMap = fiber.return?.memoizedProps?.map ||
+                        fiber.return?.return?.memoizedProps?.map ||
+                        fiber.child?.memoizedProps?.value?.map ||
+                        null;
+                    if (state.gameMap) {
+                        Logger.debug('Map found via React Fiber');
+                        return true;
+                    }
+                }
+            }
+        } catch (e) {
+            Logger.error('Map find error:', e);
+        }
+        return false;
+    }
+
+    // ========================================================================
+    // [SECTION 19] MINI MAP (LEAFLET)
+    // ========================================================================
+
+    function initMiniMap() {
+        if (typeof L !== 'undefined') {
+            setupMiniMap();
+            return;
+        }
+
+        Logger.debug('Loading Leaflet...');
+
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = CONFIG.LEAFLET_CSS;
+        document.head.appendChild(link);
+
+        const script = document.createElement('script');
+        script.src = CONFIG.LEAFLET_JS;
+
+        let loadTimeout;
+        const cleanup = () => {
+            clearTimeout(loadTimeout);
+            clearInterval(pollInterval);
+        };
+
+        const pollInterval = setInterval(() => {
+            if (typeof L !== 'undefined' && L.map) {
+                cleanup();
+                Logger.info('Leaflet loaded successfully');
+                setupMiniMap();
+            }
+        }, CONFIG.TIMING.LEAFLET_POLL_INTERVAL);
+
+        loadTimeout = setTimeout(() => {
+            cleanup();
+            Logger.error('Leaflet load timeout');
+        }, CONFIG.TIMING.LEAFLET_LOAD_TIMEOUT);
+
+        script.onerror = () => {
+            cleanup();
+            Logger.error('Failed to load Leaflet');
+        };
+
+        document.head.appendChild(script);
+    }
+
+    function setupMiniMap() {
+        if (state.miniMap || typeof L === 'undefined' || leafletInitializing) return;
+
+        leafletInitializing = true;
+
+        try {
+            state.miniMap = L.map('geohelper-minimap', {
+                zoomControl: false,
+                attributionControl: false,
+                zoomAnimation: true,
+                fadeAnimation: true,
+                minZoom: CONFIG.MAP.MIN_ZOOM,
+                worldCopyJump: true
+            });
+
+            applyMiniMapLayer(state.currentMapLayer, false);
+            state.miniMap.setView([0, 0], CONFIG.MAP.WORLD_VIEW_ZOOM);
+
+            Logger.debug('Mini map initialized');
+
+            const zoomInBtn = document.getElementById('geohelper-zoom-in');
+            const zoomOutBtn = document.getElementById('geohelper-zoom-out');
+            const zoomLevelLabel = document.getElementById('geohelper-zoom-level');
+
+            const updateZoomLabel = () => {
+                if (state.miniMap && zoomLevelLabel) {
+                    zoomLevelLabel.textContent = 'x' + state.miniMap.getZoom();
+                }
+            };
+
+            if (zoomInBtn) {
+                zoomInBtn.onclick = () => state.miniMap?.zoomIn();
+            }
+
+            if (zoomOutBtn) {
+                zoomOutBtn.onclick = () => state.miniMap?.zoomOut();
+            }
+
+            state.miniMap.on('zoomend', updateZoomLabel);
+            updateZoomLabel();
+
+            const statusBadge = document.getElementById('geohelper-status-badge');
+            if (statusBadge) {
+                statusBadge.onclick = () => refreshLocation();
+            }
+
+            leafletInitializing = false;
+
+        } catch (e) {
+            leafletInitializing = false;
+            Logger.error('Mini map setup error:', e);
+        }
+    }
+
+    function updateMiniMap() {
+        if (!state.miniMap) return;
+
+        const coords = extractCoordinates();
+        if (!coords || !Validators.isValidCoord(coords.lat, coords.lng)) return;
+
+        const currentCenter = state.miniMap.getCenter();
+        const dist = Math.abs(currentCenter.lat - coords.lat) + Math.abs(currentCenter.lng - coords.lng);
+
+        if (dist > CONFIG.MAP.PAN_THRESHOLD) {
+            if (dist < CONFIG.MAP.JUMP_THRESHOLD) {
+                state.miniMap.panTo([coords.lat, coords.lng], { animate: true, duration: 0.5 });
+            } else {
+                state.miniMap.setView([coords.lat, coords.lng], CONFIG.MAP.DEFAULT_ZOOM);
+            }
+        }
+
+        if (state.miniMapMarker) {
+            state.miniMapMarker.setLatLng([coords.lat, coords.lng]);
+        } else {
+            state.miniMapMarker = L.marker([coords.lat, coords.lng]).addTo(state.miniMap);
+        }
+
+        const refs = getUiRefs();
+        const overlay = refs.coordsOverlay;
+        if (overlay) {
+            overlay.textContent = `${coords.lat.toFixed(5)}, ${coords.lng.toFixed(5)}`;
+        }
+
+        if (!state.miniMap._sizeFixed) {
+            setTimeout(() => {
+                if (state.miniMap && !state.miniMap._destroyed) {
+                    state.miniMap.invalidateSize({ animate: false, pan: false });
+                    state.miniMap._sizeFixed = true;
+                }
+            }, 250);
+        }
+    }
+
+    // ========================================================================
+    // [SECTION 20] STATUS INDICATORS
+    // ========================================================================
+
+    function updateStatusText(text, color) {
+        const el = document.getElementById('geohelper-status-text');
+        const refs = getUiRefs();
+        const badge = refs.statusBadge;
+        const nextBadgeText = text.includes('Ready') ? '✓ Ready' :
+            text.includes('Refresh') ? '🔄 ' + text : text;
+
+        if (el && (uiRenderCache.statusText !== text || uiRenderCache.statusColor !== color)) {
+            el.textContent = text;
+            el.style.color = color;
+        }
+
+        if (badge && (uiRenderCache.badgeText !== nextBadgeText || uiRenderCache.badgeBg !== color)) {
+            badge.textContent = nextBadgeText;
+            badge.style.background = color;
+        }
+
+        uiRenderCache.statusText = text;
+        uiRenderCache.statusColor = color;
+        uiRenderCache.badgeText = nextBadgeText;
+        uiRenderCache.badgeBg = color;
+    }
+
+    function updateLedIndicator(status) {
+        const led = document.getElementById('geohelper-led-indicator');
+        if (!led) return;
+        if (uiRenderCache.ledStatus === status) return;
+
+        const colors = {
+            ready: { bg: '#4ade80', shadow: '#4ade80' },
+            refreshing: { bg: '#fbbf24', shadow: '#fbbf24' },
+            error: { bg: '#ef4444', shadow: '#ef4444' },
+            reset: { bg: '#ef4444', shadow: '#ef4444' },
+            waiting: { bg: '#9ca3af', shadow: '#9ca3af' }
+        };
+
+        const c = colors[status] || colors.ready;
+        led.style.background = c.bg;
+        led.style.boxShadow = `0 0 6px ${c.shadow}`;
+        uiRenderCache.ledStatus = status;
+    }
+
+    // ========================================================================
+    // [SECTION 21] REFRESH & PANEL CONTROLS
+    // ========================================================================
+
+    function refreshLocation() {
+        if (!guardProtectedUsage('Refresh Location')) return;
+        if (!Throttle.canRun('refresh_location', 800)) return;
+
+        const requestId = ++refreshRequestId;
+        const refreshToken = state.runtime?.flags?.USE_REQUEST_TOKENING
+        ? RequestTokens.issue('refresh_flow')
+        : 0;
+        if (state.runtime?.flags?.USE_REQUEST_TOKENING) {
+            telemetryInc('async.refreshIssued');
+        }
+        Logger.info('Refreshing location...');
+
+        const refs = getUiRefs();
+        const statusBadge = refs.statusBadge;
+        if (statusBadge) {
+            statusBadge.style.background = '#fbbf24';
+            statusBadge.style.color = '#78350f';
+            statusBadge.textContent = '🔄 Refreshing...';
+        }
+
+        updateLedIndicator('refreshing');
+
+        state.coords = { lat: null, lng: null };
+        state.address = null;
+        state.markerPlacedThisRound = false;
+        state._pendingAddressCoords = null;
+        interceptedCoords = { lat: null, lng: null };
+        lastCoords = { lat: null, lng: null };
+        monitoringLastValidCoords = null; // BUG FIX: reset round detection
+        monitoringFailCount = 0;
+        extractionCache.invalidate();
+
+        if (state.miniMapMarker && state.miniMap) {
+            try {
+                state.miniMap.removeLayer(state.miniMapMarker);
+            } catch (e) {
+                Logger.debug('Mini map marker removal warning:', e.message);
+            }
+            state.miniMapMarker = null;
+        }
+
+        if (state.miniMap) {
+            try {
+                state.miniMap.setView([0, 0], CONFIG.MAP.WORLD_VIEW_ZOOM);
+            } catch (e) {
+                Logger.debug('Mini map reset warning:', e.message);
+            }
+            const overlay = refs.coordsOverlay;
+            if (overlay) overlay.textContent = '--, --';
+        }
+
+        updateInfoDisplay();
+
+        setTimeout(async () => {
+            if (requestId !== refreshRequestId) return;
+            if (state.runtime?.flags?.USE_REQUEST_TOKENING && !RequestTokens.isCurrent('refresh_flow', refreshToken)) {
+                telemetryInc('async.refreshDiscardedStale');
+                return;
+            }
+
+            const newCoords = extractCoordinates();
+            if (newCoords && Validators.isValidCoord(newCoords.lat, newCoords.lng)) {
+                state.coords = newCoords;
+                try {
+                    if (state.runtime?.flags?.USE_REQUEST_TOKENING) {
+                        const addrToken = RequestTokens.issue('address_refresh');
+                        telemetryInc('async.addressIssued');
+                        const addr = await lookupAddress(newCoords.lat, newCoords.lng);
+                        if (RequestTokens.isCurrent('address_refresh', addrToken)) {
+                            if (applyAddressIfCurrent(newCoords, addr)) {
+                                telemetryInc('async.addressApplied');
+                                syncLatestHistoryAddress(newCoords, addr);
+                            }
+                        } else {
+                            telemetryInc('async.addressDiscardedStale');
+                        }
+                    } else {
+                        const addr = await lookupAddress(newCoords.lat, newCoords.lng);
+                        if (applyAddressIfCurrent(newCoords, addr)) {
+                            syncLatestHistoryAddress(newCoords, addr);
+                        }
+                    }
+                } catch (e) {
+                    Logger.debug('Address lookup failed after refresh');
+                }
+
+                if (state.runtime?.flags?.USE_REQUEST_TOKENING && RequestTokens.isCurrent('refresh_flow', refreshToken)) {
+                    telemetryInc('async.refreshApplied');
+                }
+                updateInfoDisplay();
+                updateMiniMap();
+
+                if (statusBadge) {
+                    statusBadge.style.background = '#4ade80';
+                    statusBadge.style.color = '#064e3b';
+                    statusBadge.textContent = '✓ Ready';
+                }
+                updateLedIndicator('ready');
+            } else {
+                if (statusBadge) {
+                    statusBadge.style.background = '#9ca3af';
+                    statusBadge.style.color = '#1f2937';
+                    statusBadge.textContent = '⏳ Waiting...';
+                }
+                updateLedIndicator('waiting');
+
+                setTimeout(() => {
+                    if (requestId !== refreshRequestId) return;
+                    if (state.runtime?.flags?.USE_REQUEST_TOKENING && !RequestTokens.isCurrent('refresh_flow', refreshToken)) {
+                        telemetryInc('async.refreshDiscardedStale');
+                        return;
+                    }
+                    const retry = extractCoordinates();
+                    if (retry && Validators.isValidCoord(retry.lat, retry.lng)) {
+                        updateStatusText('Ready', '#4ade80');
+                        updateLedIndicator('ready');
+                    }
+                }, 3000);
+            }
+        }, 2000);
+    }
+
+    function togglePanel() {
+        if (!guardProtectedUsage('Toggle Panel')) return;
+        if (!Throttle.canRun('toggle_panel', CONFIG.COOLDOWNS.TOGGLE_PANEL)) return;
+        state.infoVisible = !state.infoVisible;
+        updateInfoDisplay();
+        if (state.infoVisible) {
+            IntegrityManager.scheduleSoon('panel_open', 1000);
+        }
+    }
+
+    function openHomeQuick() {
+        if (!guardProtectedUsage('Open Home')) return;
+        if (!state.infoVisible) {
+            state.infoVisible = true;
+            updateInfoDisplay();
+        }
+        IntegrityManager.scheduleSoon('panel_open', 1000);
+        setTimeout(() => {
+            if (typeof state.swapPhoneView === 'function') {
+                state.swapPhoneView('map');
+            }
+        }, 20);
+    }
+
+    // ========================================================================
+    // [SECTION 22] DISCORD INTEGRATION
+    // ========================================================================
+
+    async function sendToDiscord() {
+        if (!guardProtectedUsage('Discord Send')) return;
+
+        if (discordInFlight) {
+            Logger.debug('Discord send skipped: request in flight');
+            return;
+        }
+        if (!Throttle.canRun('discord_send', CONFIG.COOLDOWNS.DISCORD_SEND)) {
+            Logger.debug('Discord send throttled');
+            return;
+        }
+
+        const webhook = safeGM_getValue(CONFIG.STORAGE_KEYS.DISCORD_WEBHOOK, '');
+        if (!webhook) {
+            alert('Please set Discord webhook URL in the Discord view first.');
+            return;
+        }
+
+        if (!Security.isValidDiscordWebhook(webhook)) {
+            alert('Invalid Discord webhook URL. Please check your settings.');
+            Logger.warn('Invalid webhook URL detected');
+            return;
+        }
+
+        const coords = extractCoordinates();
+        if (!coords || !Validators.isValidCoord(coords.lat, coords.lng)) {
+            alert('No valid coordinates');
+            return;
+        }
+
+        const safeAddress = Security.escapeHtml(formatAddress(state.address) || 'Unknown location');
+        const safeLat = Security.encodeParam(coords.lat.toFixed(6));
+        const safeLng = Security.encodeParam(coords.lng.toFixed(6));
+
+        const embed = {
+            title: '📍 Location Tracked',
+            description: `**${safeAddress}**\n\n[🗺️ Google Maps](https://www.google.com/maps?q=${safeLat},${safeLng})`,
+            color: 516235,
+            fields: [
+                { name: 'Coordinates', value: `\`${coords.lat.toFixed(6)}, ${coords.lng.toFixed(6)}\``, inline: true },
+                { name: 'Platform', value: state.platform, inline: true }
+            ],
+            footer: { text: `${CONFIG.NAME} v${CONFIG.VERSION}` },
+            timestamp: new Date().toISOString()
+        };
+
+        discordInFlight = true;
+        try {
+            if (typeof GM_xmlhttpRequest !== 'undefined') {
+                await new Promise((resolve, reject) => {
+                    GM_xmlhttpRequest({
+                        method: 'POST',
+                        url: webhook,
+                        headers: { 'Content-Type': 'application/json' },
+                        data: JSON.stringify({ embeds: [embed] }),
+                        timeout: 10000,
+                        onload: (res) => {
+                            if (res.status >= 200 && res.status < 300) {
+                                resolve();
+                            } else {
+                                reject(new Error(`Discord HTTP ${res.status}`));
+                            }
+                        },
+                        onerror: (err) => reject(err),
+                        ontimeout: () => reject(new Error('Discord request timeout'))
+                    });
+                });
+            } else {
+                const res = await fetch(webhook, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ embeds: [embed] })
+                });
+                if (!res.ok) throw new Error(`Discord HTTP ${res.status}`);
+            }
+            Logger.info('Discord message sent');
+        } catch (e) {
+            Logger.error('Discord error:', e);
+            alert('Failed to send to Discord');
+        } finally {
+            discordInFlight = false;
+        }
+    }
+
+    // ========================================================================
+    // [SECTION 23] KEYBOARD HANDLER
+    // ========================================================================
+
+    async function handleKeydown(e) {
+        if (isProtectionBlocked()) {
+            Logger.debug('[Integrity] Hotkey blocked by protection');
+            e.preventDefault();
+            return;
+        }
+
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) {
+            return;
+        }
+
+        const now = Date.now();
+        if (now - lastKeydownTime < CONFIG.TIMING.KEYDOWN_DEBOUNCE) return;
+        lastKeydownTime = now;
+
+        const hotkeys = getHotkeys();
+        const key = normalizeHotkey(e.key);
+
+        const hkMap = {};
+        for (const [action, hk] of Object.entries(hotkeys)) {
+            hkMap[action] = normalizeHotkey(hk);
+        }
+
+        if (hkMap.panel && key === hkMap.panel) {
+            if (!Throttle.canRun('hk_toggle', CONFIG.COOLDOWNS.TOGGLE_PANEL)) return;
+            e.preventDefault();
+            togglePanel();
+            return;
+        }
+
+        if (hkMap.marker && key === hkMap.marker) {
+            if (!Throttle.canRun('hk_marker', CONFIG.COOLDOWNS.MARKER)) return;
+            e.preventDefault();
+            if (!state.gameMap) findMapInstance();
+            await toggleMarker();
+            return;
+        }
+
+        if (hkMap.refresh && key === hkMap.refresh && state.infoVisible) {
+            if (!Throttle.canRun('hk_refresh', CONFIG.COOLDOWNS.REFRESH)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            refreshLocation();
+            return;
+        }
+
+        if (hkMap.info && key === hkMap.info) {
+            if (!Throttle.canRun('hk_info', CONFIG.COOLDOWNS.INFO)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            openHomeQuick();
+            return;
+        }
+
+        if (hkMap.copyCoords && key === hkMap.copyCoords) {
+            if (!Throttle.canRun('hk_copy', CONFIG.COOLDOWNS.COPY)) return;
+            e.preventDefault();
+            const coords = extractCoordinates();
+            if (coords && Validators.isValidCoord(coords.lat, coords.lng)) {
+                navigator.clipboard.writeText(`${coords.lat}, ${coords.lng}`)
+                    .then(() => Logger.debug('Coords copied'))
+                    .catch(() => Logger.debug('Clipboard failed'));
+            }
+            return;
+        }
+
+        if (hkMap.googleMaps && key === hkMap.googleMaps) {
+            if (!Throttle.canRun('hk_maps', CONFIG.COOLDOWNS.MAPS)) return;
+            e.preventDefault();
+            e.stopPropagation();
+
+            const coords = extractCoordinates();
+            if (coords && Validators.isValidCoord(coords.lat, coords.lng)) {
+                const lat = Security.encodeParam(coords.lat.toFixed(6));
+                const lng = Security.encodeParam(coords.lng.toFixed(6));
+                const mapsUrl = `https://www.google.com/maps?q=${lat},${lng}&ll=${lat},${lng}&z=6`;
+
+                try {
+                    const newWindow = window.open(mapsUrl, '_blank');
+                    if (!newWindow || newWindow.closed || typeof newWindow.closed === 'undefined') {
+                        window.location.href = mapsUrl;
+                    }
+                } catch (err) {
+                    Logger.error('window.open error:', err);
+                    window.location.href = mapsUrl;
+                }
+            } else {
+                Logger.debug('No valid coordinates available');
+                updateStatusText('No coords', '#ef4444');
+            }
+            return;
+        }
+
+        if (hkMap.autoPlace && key === hkMap.autoPlace) {
+            if (!Throttle.canRun('hk_auto_place', CONFIG.COOLDOWNS.AUTO_PLACE)) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+
+            if (state.features?.autoPin) {
+                // Hotkey "1" in Auto Pin mode always uses configured jitter distance.
+                await placeGuessOnMap(true);
+            } else {
+
+                if (!state.gameMap) findMapInstance();
+                const ok = await toggleMarker();
+                updateStatusText(ok ? 'Marked' : 'No map', ok ? '#4ade80' : '#ef4444');
+            }
+            return;
+        }
+
+        if (hkMap.safePlace && key === hkMap.safePlace) {
+            if (!Throttle.canRun('hk_safe_place', CONFIG.COOLDOWNS.SAFE_PLACE)) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+
+            if (state.features?.autoPin) {
+
+                await placeGuessOnMap(true);
+            } else {
+
+                const prev = !!state.features?.safeMode;
+                state.features.safeMode = true;
+                if (!state.gameMap) findMapInstance();
+                const ok = await toggleMarker();
+                state.features.safeMode = prev;
+                updateStatusText(ok ? 'Safe Marked' : 'No map', ok ? '#4ade80' : '#ef4444');
+            }
+            return;
+        }
+
+        if (hkMap.zoomIn && key === hkMap.zoomIn && state.miniMapVisible) {
+            if (!Throttle.canRun('hk_zoom_in', CONFIG.COOLDOWNS.ZOOM)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            state.miniMap?.zoomIn();
+            return;
+        }
+
+        if (hkMap.zoomOut && key === hkMap.zoomOut && state.miniMapVisible) {
+            if (!Throttle.canRun('hk_zoom_out', CONFIG.COOLDOWNS.ZOOM)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            state.miniMap?.zoomOut();
+            return;
+        }
+
+        if (hkMap.discord && key === hkMap.discord) {
+            if (!Throttle.canRun('hk_discord', CONFIG.COOLDOWNS.DISCORD)) return;
+            e.preventDefault();
+            sendToDiscord();
+            return;
+        }
+    }
+
+    // ========================================================================
+    // [SECTION 24] MONITORING LOOP
+    // ========================================================================
+
+    let monitoringLastValidCoords = null;
+    let monitoringFailCount = 0;
+    let monitoringConsecutiveErrors = 0;
+
+    function startMonitoring() {
+        if (monitoringInterval) {
+            clearInterval(monitoringInterval);
+        }
+
+        monitoringFailCount = 0;
+        monitoringLastValidCoords = null;
+        monitoringConsecutiveErrors = 0;
+        monitoringTickCounter = 0;
+
+        monitoringInterval = setInterval(async () => {
+
+            if (monitoringBusy) {
+                if (monitoringBusySince && (Date.now() - monitoringBusySince) > 10000) {
+                    Logger.warn('Monitoring was stuck - forcing reset');
+                    monitoringBusy = false;
+                    monitoringBusySince = 0;
+                }
+                return;
+            }
+            monitoringBusy = true;
+            monitoringBusySince = Date.now();
+
+            monitoringTickCounter++;
+            const lowDemandMode = !state.infoVisible &&
+                !state.miniMapVisible &&
+                !state.features?.autoMarker &&
+                !state.features?.autoPin;
+            if (lowDemandMode && (monitoringTickCounter % 3) !== 0) {
+                monitoringBusy = false;
+                monitoringBusySince = 0;
+                return;
+            }
+
+            try {
+                const coords = extractCoordinates();
+
+                if (coords && Validators.isValidCoord(coords.lat, coords.lng)) {
+                    monitoringFailCount = 0;
+                    monitoringConsecutiveErrors = 0;
+                    const changed = coords.lat !== lastCoords.lat || coords.lng !== lastCoords.lng;
+
+                    if (changed) {
+                        lastCoords = { lat: coords.lat, lng: coords.lng };
+                        state.coords = { lat: coords.lat, lng: coords.lng };
+
+                        let isNewRound = !monitoringLastValidCoords;
+
+                        Logger.debug('📍 New coordinates:', coords.lat.toFixed(6), coords.lng.toFixed(6));
+
+                        if (monitoringLastValidCoords) {
+                            const distance = Math.abs(coords.lat - monitoringLastValidCoords.lat) +
+                                  Math.abs(coords.lng - monitoringLastValidCoords.lng);
+                            if (distance > CONFIG.MAP.NEW_ROUND_THRESHOLD) {
+                                isNewRound = true;
+                                Logger.info('New round detected');
+                                state.markerPlacedThisRound = false;
+                                state.address = null; // reset address for new round
+                                extractionCache.invalidate();
+
+                                if (state.marker) {
+                                    try {
+                                        if (typeof google !== 'undefined' && google.maps && state.marker.setMap) {
+                                            state.marker.setMap(null);
+                                        } else if (typeof L !== 'undefined' && state.gameMap) {
+                                            state.gameMap.removeLayer(state.marker);
+                                        }
+                                    } catch (e) {
+
+                                    }
+                                    state.marker = null;
+                                }
+                            }
+                        }
+
+                        if (isNewRound) {
+                            addRoundHistoryEntry(coords, state.address);
+                        }
+                        monitoringLastValidCoords = { lat: coords.lat, lng: coords.lng };
+
+                        try {
+                            if (state.runtime?.flags?.USE_REQUEST_TOKENING) {
+                                const addrToken = RequestTokens.issue('address_monitor');
+                                telemetryInc('async.addressIssued');
+                                const resolvedAddress = await lookupAddress(coords.lat, coords.lng);
+
+                                if (RequestTokens.isCurrent('address_monitor', addrToken)) {
+                                    if (applyAddressIfCurrent(coords, resolvedAddress)) {
+                                        telemetryInc('async.addressApplied');
+                                        Logger.debug('📮 Address:', formatAddress(state.address));
+                                        syncLatestHistoryAddress(coords, resolvedAddress);
+                                    }
+                                } else {
+                                    telemetryInc('async.addressDiscardedStale');
+                                }
+                            } else {
+                                const resolvedAddress = await lookupAddress(coords.lat, coords.lng);
+                                if (applyAddressIfCurrent(coords, resolvedAddress)) {
+                                    Logger.debug('📮 Address:', formatAddress(state.address));
+                                    syncLatestHistoryAddress(coords, resolvedAddress);
+                                }
+                            }
+                        } catch (e) {
+                            Logger.debug('Address lookup failed:', e?.message || 'unknown');
+                        }
+
+                        try {
+                            if (state.infoVisible) {
+                                updateInfoDisplay();
+                            }
+                            if (state.miniMapVisible && state.miniMap) {
+                                updateMiniMap();
+                            }
+                        } catch (e) {
+                            Logger.debug('Display update error:', e?.message);
+                        }
+
+                        try {
+                            await autoPlaceMarker();
+                        } catch (e) {
+                            Logger.debug('Auto marker error:', e?.message);
+                        }
+
+                        if (state.marker) {
+                            try {
+                                if (typeof google !== 'undefined' && state.marker.setPosition) {
+                                    state.marker.setPosition(new google.maps.LatLng(coords.lat, coords.lng));
+                                } else if (typeof L !== 'undefined' && state.marker.setLatLng) {
+                                    state.marker.setLatLng([coords.lat, coords.lng]);
+                                }
+                            } catch (e) {
+                                Logger.debug('Marker position update failed');
+                            }
+                        }
+
+                        if (!state.gameMap) {
+                            findMapInstance();
+                        }
+                    }
+                } else {
+                    monitoringFailCount++;
+                    if (monitoringFailCount === 10) {
+                        Logger.debug('⏳ Waiting for coordinates... (platform:', state.platform, ')');
+                        monitoringFailCount = 0;
+
+                        if (!XMLHttpRequest.prototype[XHR_PATCH_FLAG]) {
+                            Logger.warn('XHR interceptor lost - reinstalling');
+                            if (state.runtime?.flags?.USE_PATCH_MANAGER) {
+                                PatchManager.ensureXHRPatch();
+                            } else {
+                                installXHRInterceptor();
+                            }
+                        }
+                    }
+
+                    if (monitoringFailCount % 20 === 5 && !state.gameMap) {
+                        findMapInstance();
+                    }
+                }
+            } catch (e) {
+                monitoringConsecutiveErrors++;
+                Logger.error('Monitoring error:', e);
+                IntegrityManager.scheduleSoon('monitor_error', 1500);
+
+                if (monitoringConsecutiveErrors >= 5) {
+                    Logger.warn('Monitoring crashed repeatedly - restarting in 3s');
+                    clearInterval(monitoringInterval);
+                    monitoringInterval = null;
+                    monitoringBusy = false;
+                    monitoringBusySince = 0;
+                    setTimeout(() => {
+                        Logger.info('Restarting monitoring after crash recovery');
+                        startMonitoring();
+                    }, 3000);
+                    return;
+                }
+            } finally {
+                monitoringBusy = false;
+                monitoringBusySince = 0;
+            }
+        }, CONFIG.TIMING.MONITORING_INTERVAL);
+    }
+
+    // ========================================================================
+    // [SECTION 25] UI CREATION - PHONE FRAME
+    // Due to size, this section contains the main createInfoDisplay function
+    // ========================================================================
+
+    function cacheOriginalInlineStyles(root) {
+        if (!root) return;
+        root.querySelectorAll('[style]').forEach((el) => {
+            if (!el.dataset.geohelperBaseStyle) {
+                el.dataset.geohelperBaseStyle = el.getAttribute('style') || '';
+            }
+        });
+    }
+
+    function applyOneUiAppViews(root, force = false) {
+        if (!root) return;
+        if (oneUiViewsStyled && !force) return;
+
+        const appViewIds = [
+            'geohelper-settings-view',
+            'geohelper-hotkeys-view',
+            'geohelper-discord-view',
+            'geohelper-copy-view',
+            'geohelper-maps-view',
+            'geohelper-history-view'
+        ];
+
+        appViewIds.forEach((id) => {
+            const view = root.querySelector(`#${id}`);
+            if (!view) return;
+
+            view.style.background = '#000000';
+
+            const header = view.firstElementChild;
+            if (header) {
+                header.style.background = '#000000';
+                header.style.borderBottom = '1px solid #1f232a';
+                header.style.padding = '14px 16px';
+                header.querySelectorAll('h2').forEach((title) => {
+                    title.style.color = '#f3f4f6';
+                    title.style.fontSize = '18px';
+                    title.style.fontWeight = '700';
+                    title.style.letterSpacing = '-0.2px';
+                });
+                header.querySelectorAll('button').forEach((btn) => {
+                    btn.style.display = 'none';
+                });
+            }
+
+            const body = header ? header.nextElementSibling : null;
+            if (!body) return;
+            body.style.background = '#000000';
+            body.style.padding = '12px 10px 34px';
+
+            body.querySelectorAll('div[style*="background:#fff"]').forEach((card) => {
+                card.style.background = '#15181d';
+                card.style.border = '1px solid #262b34';
+                card.style.borderRadius = '20px';
+                card.style.boxShadow = 'none';
+            });
+
+            body.querySelectorAll('button').forEach((btn) => {
+                const idKey = btn.id || '';
+                const isPrimary =
+                    idKey === 'geohelper-save' ||
+                    idKey === 'geohelper-hotkeys-save' ||
+                    idKey === 'geohelper-discord-save' ||
+                    idKey === 'geohelper-copy-main';
+
+                if (isPrimary) {
+                    btn.style.background = '#2f7cf6';
+                    btn.style.color = '#f8fbff';
+                    btn.style.border = 'none';
+                } else {
+                    btn.style.background = '#1b2028';
+                    btn.style.color = '#e5e7eb';
+                    btn.style.border = '1px solid #313846';
+                }
+            });
+
+            body.querySelectorAll('input[type="text"]').forEach((input) => {
+                input.style.background = '#101319';
+                input.style.border = '1px solid #323949';
+                input.style.color = '#f3f4f6';
+            });
+
+            body.querySelectorAll('[style*="color:#6b7280"], [style*="color:#9ca3af"], [style*="color:#374151"], [style*="color:#111827"]').forEach((el) => {
+                if (!el.closest('button')) {
+                    el.style.color = '#9aa3b2';
+                }
+            });
+        });
+
+        oneUiViewsStyled = true;
+    }
+
+    function getUiRefs() {
+        if (!state._uiRefs) state._uiRefs = {};
+        const refs = state._uiRefs;
+
+        if (!refs.display || !document.body.contains(refs.display)) {
+            refs.display = document.getElementById('geohelper-phone-frame');
+        }
+        const root = refs.display;
+        if (!root) return refs;
+
+        if (!refs.locationInfo || !root.contains(refs.locationInfo)) {
+            refs.locationInfo = root.querySelector('#geohelper-location-info');
+        }
+        if (!refs.statusBadge || !root.contains(refs.statusBadge)) {
+            refs.statusBadge = root.querySelector('#geohelper-status-badge');
+        }
+        if (!refs.coordsOverlay || !root.contains(refs.coordsOverlay)) {
+            refs.coordsOverlay = root.querySelector('#geohelper-coords-overlay');
+        }
+        if (!refs.copyCoords || !root.contains(refs.copyCoords)) {
+            refs.copyCoords = root.querySelector('#geohelper-copy-coords');
+        }
+
+        return refs;
+    }
+
+    function applyPhoneLikeButtonTheme(root) {
+        if (!root) return;
+        cacheOriginalInlineStyles(root);
+
+        const compact = state.uiScale === 'compact';
+        const scale = compact ? CONFIG.UI_SCALES.compact.factor : CONFIG.UI_SCALES.normal.factor;
+        const px = (value) => `${Math.round(value * scale)}px`;
+
+        root.style.fontFamily = 'system-ui, -apple-system, sans-serif';
+        root.style.background = '#000';
+        root.style.width = px(306);
+        root.style.padding = px(8);
+
+        const screen = root.firstElementChild;
+        if (screen?.style) {
+            screen.style.background = '#000';
+            screen.style.height = px(500);
+        }
+
+        ['#geohelper-map-view', '#geohelper-menu-view'].forEach(sel => {
+            const el = root.querySelector(sel);
+            if (el) el.style.background = '#0b0d11';
+        });
+
+        const appGrid = root.querySelector('#geohelper-menu-view > div');
+        if (appGrid) {
+            appGrid.style.gridTemplateColumns = 'repeat(3, minmax(0, 1fr))';
+            appGrid.style.gap = `${px(14)} ${px(10)}`;
+            appGrid.style.padding = `${px(6)} ${px(2)} 0`;
+            appGrid.style.boxSizing = 'border-box';
+        }
+
+        const locationInfo = root.querySelector('#geohelper-location-info');
+        if (locationInfo) {
+            locationInfo.style.background = '#0f1319';
+        }
+
+        const navBar = root.querySelector('#geohelper-nav-bar');
+        if (navBar) {
+            navBar.style.display = 'flex';
+        }
+
+        const navShell = root.querySelector('#geohelper-nav-shell');
+        const navStrip = root.querySelector('#geohelper-nav-strip');
+        if (navShell) {
+            navShell.style.background = 'rgba(67, 70, 77, 0.92)';
+            navShell.style.border = 'none';
+            navShell.style.boxShadow = 'none';
+        }
+        if (navStrip) {
+            navStrip.style.background = '#05070b';
+        }
+
+        root.querySelectorAll('.geohelper-app-btn').forEach((btn) => {
+            btn.style.width = '100%';
+            btn.style.alignItems = 'center';
+            btn.style.justifyContent = 'flex-start';
+            btn.style.gap = px(6);
+            btn.style.boxSizing = 'border-box';
+            btn.style.padding = '0';
+        });
+
+        root.querySelectorAll('.geohelper-app-icon').forEach((iconBox) => {
+            const baseBg = iconBox.getAttribute('data-bg') || 'linear-gradient(180deg, #2f3339 0%, #22252a 100%)';
+            iconBox.style.background = baseBg;
+            iconBox.style.border = '1px solid #3a3f48';
+            iconBox.style.width = px(48);
+            iconBox.style.height = px(48);
+            iconBox.style.margin = '0 auto';
+            iconBox.style.boxSizing = 'border-box';
+        });
+
+        root.querySelectorAll('.geohelper-app-label').forEach((label) => {
+            label.style.fontSize = px(8);
+            label.style.color = '#d1d5db';
+            label.style.textAlign = 'center';
+            label.style.lineHeight = '1.2';
+            label.style.display = 'block';
+            label.style.width = '100%';
+        });
+
+        ['geohelper-auto-marker', 'geohelper-auto-pin', 'geohelper-safe-mode', 'geohelper-ui-scale'].forEach((id) => {
+            const cb = root.querySelector(`#${id}`);
+            const slider = root.querySelector(`#${id}-slider`);
+            const dot = root.querySelector(`#${id}-dot`);
+            const label = cb?.parentElement;
+            if (label && label.style) {
+                label.style.width = px(22);
+                label.style.height = px(22);
+            }
+            if (slider) {
+                slider.style.borderRadius = '50%';
+                slider.style.borderWidth = '2px';
+            }
+            if (dot) {
+                dot.style.width = px(10);
+                dot.style.height = px(10);
+                dot.style.left = '50%';
+                dot.style.top = '50%';
+                dot.style.transform = 'translate(-50%, -50%)';
+                dot.style.borderRadius = '50%';
+            }
+        });
+
+        setFeatureToggleUi(root);
+        setPresetButtonsUi(root);
+        setMapLayerButtonsUi(root);
+        setThemeButtonsUi(root);
+        setUiScaleButtonsUi(root);
+
+    }
+
+    function setupActionButtons() {
+        const flashActionButton = (container, labelText) => {
+            if (!container) return;
+            const label = container.querySelector('span:last-child');
+            const iconDiv = container.querySelector('div');
+            if (!label || !iconDiv) return;
+
+            const originalLabel = label.textContent;
+            const originalBg = iconDiv.style.background;
+
+            label.textContent = labelText;
+            iconDiv.style.background = '#4ade80';
+
+            setTimeout(() => {
+                label.textContent = originalLabel;
+                iconDiv.style.background = originalBg;
+            }, 1000);
+        };
+
+        const markBtn = document.getElementById('geohelper-action-mark');
+        if (markBtn) {
+            markBtn.onclick = Throttle.createHandler('panel_mark_btn', 300, async () => {
+                if (state.features?.autoPin) {
+                    const ok = await placeGuessOnMap(!!state.features?.safeMode);
+                    flashActionButton(markBtn, ok ? 'Pinned!' : 'Error');
+                } else {
+                    if (!state.gameMap) findMapInstance();
+                    const ok = await toggleMarker();
+                    updateStatusText(ok ? 'Marked' : 'No map', ok ? '#4ade80' : '#ef4444');
+                    flashActionButton(markBtn, ok ? 'Marked!' : 'Error');
+                }
+            });
+        }
+
+        const safeBtn = document.getElementById('geohelper-action-safe');
+        if (safeBtn) {
+            safeBtn.onclick = Throttle.createHandler('panel_safe_btn', 300, async () => {
+                if (state.features?.autoPin) {
+                    const ok = await placeGuessOnMap(true);
+                    flashActionButton(safeBtn, ok ? 'Safe Pin!' : 'Error');
+                } else {
+                    const prev = !!state.features?.safeMode;
+                    state.features.safeMode = true;
+                    if (!state.gameMap) findMapInstance();
+                    const ok = await toggleMarker();
+                    state.features.safeMode = prev;
+                    updateStatusText(ok ? 'Safe Marked' : 'No map', ok ? '#4ade80' : '#ef4444');
+                    flashActionButton(safeBtn, ok ? 'Safe Set!' : 'Error');
+                }
+            });
+        }
+
+        const refreshBtn = document.getElementById('geohelper-action-refresh');
+        if (refreshBtn) {
+            refreshBtn.onclick = Throttle.createHandler('panel_refresh_btn', 700, () => {
+                refreshLocation();
+                flashActionButton(refreshBtn, 'Syncing...');
+            });
+        }
+    }
+
+    function bindPresetAndLayerControls(phoneFrame) {
+        phoneFrame.querySelectorAll('[data-preset]').forEach((btn) => {
+            btn.onclick = () => {
+                const presetName = btn.dataset.preset;
+                if (presetName) applyPresetMode(presetName, false);
+            };
+        });
+
+        phoneFrame.querySelectorAll('[data-map-layer]').forEach((btn) => {
+            btn.onclick = () => {
+                const layer = btn.dataset.mapLayer;
+                if (layer) applyMiniMapLayer(layer, false);
+            };
+        });
+    }
+
+    function bindScaleControl(phoneFrame) {
+        const scaleToggle = phoneFrame.querySelector('#geohelper-ui-scale');
+        if (!scaleToggle) return;
+        scaleToggle.onchange = () => {
+            applyUiScale(scaleToggle.checked ? 'compact' : 'normal', false);
+        };
+    }
+
+    function bindJitterControls(phoneFrame) {
+        const jitterBox = phoneFrame.querySelector('#geohelper-jitter-controls-box');
+        const jitterRange = phoneFrame.querySelector('#geohelper-jitter-range');
+        const jitterUnit = phoneFrame.querySelector('#geohelper-jitter-unit');
+        const jitterLabel = phoneFrame.querySelector('#geohelper-jitter-label');
+        if (!jitterRange || !jitterUnit || !jitterLabel) return;
+
+        const syncStepAndValue = () => {
+            state.jitterUnit = normalizeJitterUnit(jitterUnit.value);
+            jitterRange.step = state.jitterUnit === 'km' ? '5' : '50';
+            state.jitterDistance = normalizeJitterDistance(jitterRange.value, state.jitterUnit);
+            jitterRange.value = String(state.jitterDistance);
+        };
+
+        const updateLabel = () => {
+            const unitLabel = state.jitterUnit === 'km' ? 'km' : 'm';
+            jitterLabel.textContent = `Batas Acak: 0 - ${Number(state.jitterDistance).toLocaleString('en-US')} ${unitLabel}`;
+        };
+
+        const persistJitterSettings = () => {
+            safeGM_setValue(CONFIG.STORAGE_KEYS.JITTER_DISTANCE, state.jitterDistance);
+            safeGM_setValue(CONFIG.STORAGE_KEYS.JITTER_UNIT, state.jitterUnit);
+        };
+
+        syncStepAndValue();
+        updateLabel();
+
+        jitterRange.addEventListener('input', () => {
+            state.jitterDistance = normalizeJitterDistance(jitterRange.value, jitterUnit.value);
+            updateLabel();
+        });
+
+        jitterRange.addEventListener('change', () => {
+            syncStepAndValue();
+            updateLabel();
+            persistJitterSettings();
+        });
+
+        jitterUnit.addEventListener('change', () => {
+            syncStepAndValue();
+            updateLabel();
+            persistJitterSettings();
+        });
+
+        setJitterControlsUi(phoneFrame);
+    }
+
+    function bindSaveResetControls(phoneFrame) {
+        const saveBtn = phoneFrame.querySelector('#geohelper-save');
+        if (saveBtn) {
+            saveBtn.onclick = () => {
+                const newHotkeys = {};
+                phoneFrame.querySelectorAll('[data-hotkey]').forEach(input => {
+                    newHotkeys[input.dataset.hotkey] = input.value.trim() || CONFIG.DEFAULT_HOTKEYS[input.dataset.hotkey];
+                });
+
+                state.hotkeys = { ...CONFIG.DEFAULT_HOTKEYS, ...newHotkeys };
+                const webhook = (phoneFrame.querySelector('#geohelper-discord-webhook')?.value || '').trim();
+
+                const saved = persistSettingsSnapshot({
+                    hotkeys: state.hotkeys,
+                    features: state.features,
+                    preset: state.currentPreset,
+                    mapLayer: state.currentMapLayer,
+                    uiScale: state.uiScale,
+                    jitterDistance: state.jitterDistance,
+                    jitterUnit: state.jitterUnit,
+                    discordWebhook: webhook
+                });
+
+                applySettingsToState(saved);
+
+                saveBtn.textContent = '✅ Saved!';
+                saveBtn.disabled = true;
+                setTimeout(() => {
+                    saveBtn.textContent = '💾 Save';
+                    saveBtn.disabled = false;
+                }, CONFIG.TIMING.BUTTON_FEEDBACK_DURATION);
+            };
+        }
+
+        const resetBtn = phoneFrame.querySelector('#geohelper-reset');
+        if (!resetBtn) return;
+        resetBtn.onclick = () => {
+            if (!window.confirm('Reset all settings to default?')) return;
+
+            resetSettingsToDefaults(true);
+            syncPanelSettingsUiFromState();
+            applyMiniMapLayer(state.currentMapLayer, false);
+
+            resetBtn.textContent = '✅ Reset!';
+            setTimeout(() => { resetBtn.textContent = '🔄 Reset'; }, CONFIG.TIMING.BUTTON_FEEDBACK_DURATION);
+        };
+    }
+
+    function bindFeatureToggles(phoneFrame) {
+        const amCb = phoneFrame.querySelector('#geohelper-auto-marker');
+        if (amCb) {
+            amCb.addEventListener('change', () => {
+                state.features.autoMarker = amCb.checked;
+                setFeatureToggleUi(phoneFrame);
+                state.currentPreset = detectPresetFromFeatures(state.features);
+                setPresetButtonsUi(phoneFrame);
+            });
+        }
+
+        const apCb = phoneFrame.querySelector('#geohelper-auto-pin');
+        if (apCb) {
+            apCb.addEventListener('change', () => {
+                state.features.autoPin = apCb.checked;
+                setFeatureToggleUi(phoneFrame);
+            });
+        }
+
+        const smCb = phoneFrame.querySelector('#geohelper-safe-mode');
+        if (!smCb) return;
+        smCb.addEventListener('change', () => {
+            state.features.safeMode = smCb.checked;
+            setFeatureToggleUi(phoneFrame);
+            state.currentPreset = detectPresetFromFeatures(state.features);
+            setPresetButtonsUi(phoneFrame);
+        });
+    }
+
+    function bindSessionControls(phoneFrame) {
+        const exportSessionBtn = phoneFrame.querySelector('#geohelper-export-session');
+        if (exportSessionBtn) {
+            exportSessionBtn.onclick = Throttle.createHandler('export_session_backup', CONFIG.COOLDOWNS.SESSION_BACKUP, () => {
+                exportFullSessionBackup();
+            });
+        }
+
+        const importSessionBtn = phoneFrame.querySelector('#geohelper-import-session');
+        if (importSessionBtn) {
+            importSessionBtn.onclick = Throttle.createHandler('import_session_backup', CONFIG.COOLDOWNS.SESSION_BACKUP, () => {
+                pickAndImportSessionBackupFile();
+            });
+        }
+    }
+
+    function wirePhoneSettings(phoneFrame) {
+        if (!phoneFrame) return;
+        bindPresetAndLayerControls(phoneFrame);
+        bindScaleControl(phoneFrame);
+        bindJitterControls(phoneFrame);
+        bindSaveResetControls(phoneFrame);
+        bindFeatureToggles(phoneFrame);
+        bindSessionControls(phoneFrame);
+    }
+
+    const PHONE_APP_VIEWS = Object.freeze(['settings', 'hotkeys', 'discord', 'copyApp', 'mapsApp', 'historyApp']);
+    const PHONE_VIEW_OFFSETS = Object.freeze({
+        map: 0,
+        menu: -100,
+        settings: -200,
+        hotkeys: -300,
+        discord: -400,
+        copyApp: -500,
+        mapsApp: -600,
+        historyApp: -700
+    });
+
+    function isPhoneAppView(view) {
+        return PHONE_APP_VIEWS.includes(view);
+    }
+
+    function getPhoneViewOffset(view) {
+        return PHONE_VIEW_OFFSETS[view] ?? 0;
+    }
+
+    function bindPhoneNavigationButtons(menuBtn, homeBtn, swapBtn, swapToView, getCurrentView, syncBottomNavState) {
+        menuBtn.onclick = (e) => { e.stopPropagation(); swapToView('menu'); };
+        homeBtn.onclick = (e) => { e.stopPropagation(); swapToView('map'); };
+        swapBtn.onclick = (e) => {
+            e.stopPropagation();
+            const inAppView = isPhoneAppView(getCurrentView());
+            if (inAppView) {
+                swapToView('menu');
+            } else {
+                swapToView(getCurrentView() === 'map' ? 'menu' : 'map');
+            }
+        };
+        syncBottomNavState(getCurrentView());
+    }
+
+    function bindPhoneAppLauncherButtons(swapToView) {
+        document.getElementById('geohelper-app-settings')?.addEventListener('click', (e) => { e.stopPropagation(); swapToView('settings'); });
+        document.getElementById('geohelper-app-hotkeys')?.addEventListener('click', (e) => { e.stopPropagation(); swapToView('hotkeys'); });
+        document.getElementById('geohelper-app-discord')?.addEventListener('click', (e) => { e.stopPropagation(); swapToView('discord'); });
+        document.getElementById('geohelper-app-history')?.addEventListener('click', (e) => { e.stopPropagation(); swapToView('historyApp'); });
+        document.getElementById('geohelper-copy-btn')?.addEventListener('click', (e) => { e.stopPropagation(); swapToView('copyApp'); });
+        document.getElementById('geohelper-maps-btn')?.addEventListener('click', (e) => { e.stopPropagation(); swapToView('mapsApp'); });
+    }
+
+    function bindHotkeysSaveButton() {
+        document.getElementById('geohelper-hotkeys-save')?.addEventListener('click', () => {
+            const newHotkeys = {};
+            document.querySelectorAll('#geohelper-hotkeys-view [data-hotkey]').forEach(input => {
+                newHotkeys[input.dataset.hotkey] = input.value.trim() || CONFIG.DEFAULT_HOTKEYS[input.dataset.hotkey];
+            });
+            state.hotkeys = { ...CONFIG.DEFAULT_HOTKEYS, ...newHotkeys };
+            persistSettingsSnapshot({ hotkeys: state.hotkeys });
+            const btn = document.getElementById('geohelper-hotkeys-save');
+            if (btn) { btn.textContent = '✅ Saved!'; setTimeout(() => { btn.textContent = '💾 Save Hotkeys'; }, 1500); }
+        });
+    }
+
+    function bindDiscordButtons() {
+        document.getElementById('geohelper-discord-save')?.addEventListener('click', () => {
+            const webhook = document.getElementById('geohelper-discord-webhook')?.value?.trim() || '';
+            persistSettingsSnapshot({ discordWebhook: webhook });
+            const btn = document.getElementById('geohelper-discord-save');
+            if (btn) { btn.textContent = '✅ Saved!'; setTimeout(() => { btn.textContent = '💾 Save'; }, 1500); }
+        });
+
+        document.getElementById('geohelper-discord-test')?.addEventListener('click', async () => {
+            if (!Throttle.canRun('discord_test', 2000)) return;
+            const webhook = document.getElementById('geohelper-discord-webhook')?.value?.trim() || '';
+            if (!webhook || !Security.isValidDiscordWebhook(webhook)) {
+                alert('Please enter a valid Discord webhook URL');
+                return;
+            }
+            const btn = document.getElementById('geohelper-discord-test');
+            if (btn) btn.textContent = '⏳...';
+
+            try {
+                const embed = { title: '🧪 Test', description: `${CONFIG.NAME} connected!`, color: 5793266 };
+                if (typeof GM_xmlhttpRequest !== 'undefined') {
+                    await new Promise((resolve, reject) => {
+                        GM_xmlhttpRequest({
+                            method: 'POST', url: webhook,
+                            headers: { 'Content-Type': 'application/json' },
+                            data: JSON.stringify({ embeds: [embed] }),
+                            onload: (res) => res.status >= 200 && res.status < 300 ? resolve() : reject(),
+                            onerror: reject
+                        });
+                    });
+                } else {
+                    const res = await fetch(webhook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ embeds: [embed] }) });
+                    if (!res.ok) throw new Error();
+                }
+                if (btn) { btn.textContent = '✅ Sent!'; btn.style.background = '#10b981'; }
+            } catch (e) {
+                if (btn) { btn.textContent = '❌ Failed'; btn.style.background = '#ef4444'; }
+            }
+            setTimeout(() => { if (btn) { btn.textContent = '🧪 Test'; btn.style.background = '#fff'; } }, 2000);
+        });
+    }
+
+    function bindCopyButton() {
+        document.getElementById('geohelper-copy-main')?.addEventListener('click', () => {
+            if (!Throttle.canRun('copy_coords', 400)) return;
+            const coords = extractCoordinates();
+            if (coords && Validators.isValidCoord(coords.lat, coords.lng)) {
+                navigator.clipboard.writeText(`${coords.lat.toFixed(6)}, ${coords.lng.toFixed(6)}`).then(() => {
+                    const btn = document.getElementById('geohelper-copy-main');
+                    if (btn) { btn.innerHTML = '<span>✅</span> Copied!'; setTimeout(() => { btn.innerHTML = '📋 Copy Coordinates'; }, 1500); }
+                });
+            }
+        });
+    }
+
+    function bindOpenMapsButton() {
+        document.getElementById('geohelper-open-gmaps')?.addEventListener('click', () => {
+            if (!Throttle.canRun('open_gmaps', 500)) return;
+            const coords = extractCoordinates();
+            if (coords && Validators.isValidCoord(coords.lat, coords.lng)) {
+                window.open(`https://www.google.com/maps?q=${coords.lat.toFixed(6)},${coords.lng.toFixed(6)}`, '_blank');
+            }
+        });
+    }
+
+    function bindMapsLayerButtons(mapsView) {
+        mapsView.querySelectorAll('[data-map-layer]').forEach((btn) => {
+            btn.onclick = () => {
+                const layer = btn.dataset.mapLayer;
+                if (layer) { applyMiniMapLayer(layer, true); setMapLayerButtonsUi(mapsView); }
+            };
+        });
+    }
+
+    function bindPhoneUtilityButtons(mapsView) {
+        bindHotkeysSaveButton();
+        bindDiscordButtons();
+        bindCopyButton();
+        bindOpenMapsButton();
+        bindMapsLayerButtons(mapsView);
+    }
+
+    function enablePhoneDragAndClock(phoneFrame, statusBar) {
+        let dragActive = false;
+        let dragOffsetX = 0;
+        let dragOffsetY = 0;
+        const DRAG_MARGIN = 8;
+
+        const clampPosition = (rawX, rawY) => {
+            const pw = phoneFrame.offsetWidth || 320;
+            const ph = phoneFrame.offsetHeight || 560;
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+
+            const minX = DRAG_MARGIN;
+            const minY = DRAG_MARGIN;
+            const maxX = vw - pw - DRAG_MARGIN;
+            const maxY = vh - ph - DRAG_MARGIN;
+
+            return {
+                x: Math.round(Math.min(Math.max(rawX, minX), Math.max(maxX, minX))),
+                y: Math.round(Math.min(Math.max(rawY, minY), Math.max(maxY, minY)))
+            };
+        };
+
+        const applyPosition = (rawX, rawY) => {
+            const { x, y } = clampPosition(rawX, rawY);
+            phoneFrame.style.left = x + 'px';
+            phoneFrame.style.top = y + 'px';
+        };
+
+        const persistCurrentPosition = () => {
+            const rect = phoneFrame.getBoundingClientRect();
+            safeGM_setValue(CONFIG.STORAGE_KEYS.UI_LEFT, Math.round(rect.left));
+            safeGM_setValue(CONFIG.STORAGE_KEYS.UI_TOP, Math.round(rect.top));
+        };
+
+        const onMouseMove = (e) => {
+            if (!dragActive) return;
+            applyPosition(e.clientX - dragOffsetX, e.clientY - dragOffsetY);
+        };
+
+        const endMouseDrag = () => {
+            if (!dragActive) return;
+            dragActive = false;
+            statusBar.style.cursor = 'grab';
+            document.removeEventListener('mousemove', onMouseMove);
+            document.removeEventListener('mouseup', endMouseDrag);
+            persistCurrentPosition();
+        };
+
+        statusBar.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            const rect = phoneFrame.getBoundingClientRect();
+            dragOffsetX = e.clientX - rect.left;
+            dragOffsetY = e.clientY - rect.top;
+            dragActive = true;
+            statusBar.style.cursor = 'grabbing';
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', endMouseDrag);
+        });
+
+        const onTouchMove = (e) => {
+            if (!dragActive || !e.touches?.[0]) return;
+            e.preventDefault();
+            applyPosition(
+                e.touches[0].clientX - dragOffsetX,
+                e.touches[0].clientY - dragOffsetY
+            );
+        };
+
+        const endTouchDrag = () => {
+            if (!dragActive) return;
+            dragActive = false;
+            statusBar.style.cursor = 'grab';
+            document.removeEventListener('touchmove', onTouchMove);
+            document.removeEventListener('touchend', endTouchDrag);
+            document.removeEventListener('touchcancel', endTouchDrag);
+            persistCurrentPosition();
+        };
+
+        statusBar.addEventListener('touchstart', (e) => {
+            if (!e.touches?.[0]) return;
+            const rect = phoneFrame.getBoundingClientRect();
+            dragOffsetX = e.touches[0].clientX - rect.left;
+            dragOffsetY = e.touches[0].clientY - rect.top;
+            dragActive = true;
+            statusBar.style.cursor = 'grabbing';
+            document.addEventListener('touchmove', onTouchMove, { passive: false });
+            document.addEventListener('touchend', endTouchDrag);
+            document.addEventListener('touchcancel', endTouchDrag);
+        }, { passive: true });
+
+        const onWindowResize = () => {
+            const rect = phoneFrame.getBoundingClientRect();
+            applyPosition(rect.left, rect.top);
+        };
+        window.addEventListener('resize', onWindowResize);
+        phoneResizeHandler = onWindowResize;
+
+        setTimeout(() => {
+            const margin = 12;
+            const fallbackX = Math.max(margin, window.innerWidth - (phoneFrame.offsetWidth || 320) - margin);
+            const fallbackY = Math.max(margin, window.innerHeight - (phoneFrame.offsetHeight || 560) - margin);
+            const storedX = Number(safeGM_getValue(CONFIG.STORAGE_KEYS.UI_LEFT, fallbackX));
+            const storedY = Number(safeGM_getValue(CONFIG.STORAGE_KEYS.UI_TOP, fallbackY));
+            const x = Number.isFinite(storedX) ? storedX : fallbackX;
+            const y = Number.isFinite(storedY) ? storedY : fallbackY;
+            applyPosition(x, y);
+        }, 0);
+
+        const clockEl = document.getElementById('geohelper-clock');
+        if (clockEl) {
+            const updateClock = () => {
+                const now = new Date();
+                clockEl.textContent = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+            };
+            updateClock();
+            phoneClockInterval = setInterval(updateClock, CONFIG.TIMING.CLOCK_UPDATE_INTERVAL);
+        }
+    }
+
+    // ========================================================================
+    // [SECTION 25-A] UI HTML BUILDERS
+    // ========================================================================
+
+    function buildPhoneStatusBarHtml() {
+        return '<div style="display:flex;align-items:center;gap:8px;">' +
+            '<div id="geohelper-led-indicator" style="width:6px;height:6px;border-radius:50%;background:#4ade80;box-shadow:0 0 6px #4ade80;transition:all 0.3s;"></div>' +
+            '<span id="geohelper-clock">12:00</span>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:10px;">' +
+            '<span style="font-size:10px;font-weight:700;color:#9ca3af;letter-spacing:0.3px;">' + Security.escapeHtml(CONFIG.NAME) + '</span>' +
+            '<div style="display:flex;gap:6px;align-items:center;">' +
+                '<span>📶</span>' +
+                '<span>📳</span>' +
+                '<span>🔋</span>' +
+            '</div>' +
+        '</div>';
+    }
+
+    function buildMiniMapSectionHtml() {
+        return '<div id="geohelper-minimap" style="width:100%;height:100%;background:#cbd5e1;"></div>' +
+            '<div id="geohelper-status-badge" style="position:absolute;top:12px;left:12px;background:rgba(74,222,128,0.95);padding:4px 10px;border-radius:6px;font-size:11px;color:#064e3b;font-weight:800;cursor:pointer;z-index:1000;">✓ Ready</div>' +
+            '<div style="position:absolute;top:12px;right:12px;display:flex;flex-direction:column;gap:4px;z-index:1000;">' +
+                '<div style="display:flex;flex-direction:column;gap:1px;box-shadow:0 2px 8px rgba(0,0,0,0.15);border-radius:18px;overflow:hidden;">' +
+                    '<button id="geohelper-zoom-in" style="width:36px;height:36px;background:#fff;border:none;color:#374151;cursor:pointer;font-size:18px;font-weight:bold;">+</button>' +
+                    '<button id="geohelper-zoom-out" style="width:36px;height:36px;background:#fff;border:none;color:#374151;cursor:pointer;font-size:18px;font-weight:bold;">−</button>' +
+                '</div>' +
+                '<div id="geohelper-zoom-level" style="background:rgba(255,255,255,0.9);padding:2px 8px;border-radius:10px;font-size:10px;font-weight:800;color:#1f2937;text-align:center;">x2</div>' +
+            '</div>' +
+            '<div id="geohelper-coords-overlay" style="position:absolute;bottom:12px;left:12px;background:rgba(255,255,255,0.9);padding:4px 10px;border-radius:6px;font-family:monospace;font-size:11px;color:#1f2937;font-weight:700;z-index:1000;">--, --</div>';
+    }
+
+    function buildLocationPlaceholderHtml() {
+        return '<div style="text-align:center;padding:20px 10px;">' +
+            '<div style="font-size:32px;margin-bottom:8px;">🌍</div>' +
+            '<div style="color:#d1d5db;font-size:13px;font-weight:500;">Waiting for location...</div>' +
+        '</div>';
+    }
+
+    function buildAppButtonHtml(app) {
+        return '<div class="geohelper-app-icon" data-bg="' + Security.escapeAttr(app.bg) + '" style="width:56px;height:56px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:25px;background:' + app.bg + ';">' +
+            app.icon +
+        '</div>' +
+        '<span class="geohelper-app-label" style="font-size:10px;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,0.3);">' + Security.escapeHtml(app.label) + '</span>';
+    }
+
+    function buildSettingsViewHtml() {
+        return '<div style="background:#fff;padding:16px 20px;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;gap:12px;">' +
+            '<h2 style="margin:0;font-size:18px;font-weight:700;color:#111827;">Settings</h2>' +
+        '</div>' +
+        '<div style="flex:1;overflow-y:auto;padding:16px;">' +
+            '<div style="background:#fff;border-radius:16px;padding:16px;margin-bottom:16px;">' +
+                '<div style="font-size:12px;color:#6b7280;font-weight:700;margin-bottom:14px;">🔴 SETTING MARKER</div>' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">' +
+                    '<div><div style="font-weight:600;font-size:14px;">Auto Marker</div><div style="font-size:11px;color:#6b7280;">Off: Manual Marker, On: Auto Marker per round</div></div>' +
+                    '<label style="position:relative;display:inline-block;width:22px;height:22px;">' +
+                        '<input type="checkbox" id="geohelper-auto-marker"' + (state.features?.autoMarker ? ' checked' : '') + ' style="opacity:0;width:0;height:0;">' +
+                        '<span id="geohelper-auto-marker-slider" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#2b313b;border:2px solid #465062;transition:.2s;border-radius:50%;"></span>' +
+                        '<span id="geohelper-auto-marker-dot" style="position:absolute;height:10px;width:10px;left:50%;top:50%;transform:translate(-50%,-50%);background-color:#f8fafc;transition:.2s;border-radius:50%;opacity:0;"></span>' +
+                    '</label>' +
+                '</div>' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">' +
+                    '<div><div style="font-weight:600;font-size:14px;">Auto Pin</div><div style="font-size:11px;color:#6b7280;">Off: place marker, On: pin guess on game map</div></div>' +
+                    '<label style="position:relative;display:inline-block;width:22px;height:22px;">' +
+                        '<input type="checkbox" id="geohelper-auto-pin"' + (state.features?.autoPin ? ' checked' : '') + ' style="opacity:0;width:0;height:0;">' +
+                        '<span id="geohelper-auto-pin-slider" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#2b313b;border:2px solid #465062;transition:.2s;border-radius:50%;"></span>' +
+                        '<span id="geohelper-auto-pin-dot" style="position:absolute;height:10px;width:10px;left:50%;top:50%;transform:translate(-50%,-50%);background-color:#f8fafc;transition:.2s;border-radius:50%;opacity:0;"></span>' +
+                    '</label>' +
+                '</div>' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
+                    '<div><div style="font-weight:600;font-size:14px;">Safe Mode</div><div style="font-size:11px;color:#6b7280;">Bounded random jitter anti-water</div></div>' +
+                    '<label style="position:relative;display:inline-block;width:22px;height:22px;">' +
+                        '<input type="checkbox" id="geohelper-safe-mode"' + (state.features?.safeMode ? ' checked' : '') + ' style="opacity:0;width:0;height:0;">' +
+                        '<span id="geohelper-safe-mode-slider" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#2b313b;border:2px solid #465062;transition:.2s;border-radius:50%;"></span>' +
+                        '<span id="geohelper-safe-mode-dot" style="position:absolute;height:10px;width:10px;left:50%;top:50%;transform:translate(-50%,-50%);background-color:#f8fafc;transition:.2s;border-radius:50%;opacity:0;"></span>' +
+                    '</label>' +
+                '</div>' +
+                '<div id="geohelper-jitter-controls-box" style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:12px;padding:12px;margin-top:10px;max-height:140px;overflow:hidden;display:block;">' +
+                    '<div id="geohelper-jitter-label" style="font-size:12px;color:#374151;font-weight:700;margin-bottom:10px;">Batas Acak: 0 - ' + Number(state.jitterDistance || CONFIG.DEFAULTS.JITTER_DISTANCE).toLocaleString('en-US') + ' ' + Security.escapeHtml(state.jitterUnit || CONFIG.DEFAULTS.JITTER_UNIT) + '</div>' +
+                    '<div style="display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;">' +
+                        '<input type="range" id="geohelper-jitter-range" min="0" max="10000" step="' + ((state.jitterUnit || CONFIG.DEFAULTS.JITTER_UNIT) === 'km' ? '5' : '50') + '" value="' + Number(state.jitterDistance || CONFIG.DEFAULTS.JITTER_DISTANCE) + '" style="width:100%;cursor:pointer;accent-color:#1a73e8;">' +
+                        '<select id="geohelper-jitter-unit" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:10px;background:#fff;font-size:12px;font-weight:700;color:#111827;">' +
+                            '<option value="m"' + ((state.jitterUnit || CONFIG.DEFAULTS.JITTER_UNIT) === 'm' ? ' selected' : '') + '>Meter (m)</option>' +
+                            '<option value="km"' + ((state.jitterUnit || CONFIG.DEFAULTS.JITTER_UNIT) === 'km' ? ' selected' : '') + '>Kilometer (km)</option>' +
+                        '</select>' +
+                    '</div>' +
+                '</div>' +
+            '</div>' +
+            '<div style="background:#fff;border-radius:16px;padding:16px;margin-bottom:16px;">' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
+                    '<div style="font-size:12px;color:#6b7280;font-weight:700;">⚡ Preset Mode</div>' +
+                    '<div id="geohelper-preset-status" style="font-size:10px;color:#4ade80;font-weight:800;">MODE: ' + String(state.currentPreset || '').toUpperCase() + '</div>' +
+                '</div>' +
+                '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">' +
+                    '<button data-preset="exact" style="padding:10px;border-radius:10px;border:2px solid #e5e7eb;background:#fff;cursor:pointer;font-size:12px;font-weight:700;">Exact</button>' +
+                    '<button data-preset="safe" style="padding:10px;border-radius:10px;border:2px solid #e5e7eb;background:#fff;cursor:pointer;font-size:12px;font-weight:700;">Safe</button>' +
+                    '<button data-preset="stealth" style="padding:10px;border-radius:10px;border:2px solid #e5e7eb;background:#fff;cursor:pointer;font-size:12px;font-weight:700;">Stealth</button>' +
+                '</div>' +
+            '</div>' +
+            '<div style="background:#fff;border-radius:16px;padding:16px;margin-bottom:16px;">' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
+                    '<div style="font-size:12px;color:#6b7280;font-weight:700;">📐 UI Scale</div>' +
+                    '<div id="geohelper-scale-status" style="font-size:10px;color:#4ade80;font-weight:800;">SCALE: ' + String(state.uiScale || CONFIG.DEFAULTS.UI_SCALE).toUpperCase() + '</div>' +
+                '</div>' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;">' +
+                    '<div><div style="font-weight:600;font-size:14px;">Mode Compact</div><div style="font-size:11px;color:#6b7280;">Off: Normal, On: Compact</div></div>' +
+                    '<label style="position:relative;display:inline-block;width:22px;height:22px;">' +
+                        '<input type="checkbox" id="geohelper-ui-scale"' + (state.uiScale === 'compact' ? ' checked' : '') + ' style="opacity:0;width:0;height:0;">' +
+                        '<span id="geohelper-ui-scale-slider" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#2b313b;border:2px solid #465062;transition:.2s;border-radius:50%;"></span>' +
+                        '<span id="geohelper-ui-scale-dot" style="position:absolute;height:10px;width:10px;left:50%;top:50%;transform:translate(-50%,-50%);background-color:#f8fafc;transition:.2s;border-radius:50%;opacity:0;"></span>' +
+                    '</label>' +
+                '</div>' +
+            '</div>' +
+            '<div style="background:#fff;border-radius:16px;padding:16px;margin-bottom:16px;">' +
+                '<div style="font-size:12px;color:#6b7280;font-weight:700;margin-bottom:12px;">🧰 Session Backup</div>' +
+                '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">' +
+                    '<button id="geohelper-export-session" style="padding:12px;background:#fff;border:2px solid #e5e7eb;border-radius:12px;cursor:pointer;font-size:12px;font-weight:700;">📤 Backup</button>' +
+                    '<button id="geohelper-import-session" style="padding:12px;background:#fff;border:2px solid #e5e7eb;border-radius:12px;cursor:pointer;font-size:12px;font-weight:700;">📥 Restore</button>' +
+                '</div>' +
+            '</div>' +
+            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:40px;">' +
+                '<button id="geohelper-save" style="padding:14px;background:#1a73e8;color:#fff;border:none;border-radius:14px;cursor:pointer;font-weight:700;font-size:14px;">💾 Save</button>' +
+                '<button id="geohelper-reset" style="padding:14px;background:#fff;color:#ef4444;border:2px solid #ef4444;border-radius:14px;cursor:pointer;font-weight:700;font-size:14px;">🔄 Reset</button>' +
+            '</div>' +
+        '</div>';
+    }
+
+    function buildHotkeyRowsHtml(savedHotkeys) {
+        return Object.entries(CONFIG.DEFAULT_HOTKEYS).map(([hk, val]) => {
+            const label = Security.escapeHtml(hk.replace(/([A-Z])/g, ' $1'));
+            const desc = Security.escapeHtml(getHotkeyDescription(hk));
+            const value = Security.escapeAttr(savedHotkeys[hk] || val);
+            return '<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #f3f4f6;">' +
+                '<div><label style="font-size:13px;font-weight:600;text-transform:capitalize;">' + label + '</label><div style="font-size:10px;color:#9ca3af;">' + desc + '</div></div>' +
+                '<input type="text" maxlength="10" data-hotkey="' + hk + '" value="' + value + '" style="width:80px;text-align:center;padding:8px;border:2px solid #e5e7eb;border-radius:10px;font-size:12px;font-weight:700;color:#ec4899;">' +
+            '</div>';
+        }).join('');
+    }
+
+    function buildHotkeysViewHtml(savedHotkeys) {
+        const hotkeyRows = buildHotkeyRowsHtml(savedHotkeys);
+        return '<div style="background:linear-gradient(135deg, #ec4899 0%, #be185d 100%);padding:16px 20px;display:flex;align-items:center;gap:12px;">' +
+            '<h2 style="margin:0;font-size:18px;font-weight:700;color:#fff;">⌨️ Hotkeys</h2>' +
+        '</div>' +
+        '<div style="flex:1;overflow-y:auto;padding:16px;">' +
+            '<div style="background:#fff;border-radius:16px;padding:16px;margin-bottom:16px;">' +
+                '<div style="font-size:12px;color:#6b7280;font-weight:700;margin-bottom:14px;">🎮 Key Bindings</div>' +
+                hotkeyRows +
+            '</div>' +
+            '<button id="geohelper-hotkeys-save" style="width:100%;padding:14px;background:linear-gradient(135deg, #ec4899 0%, #be185d 100%);color:#fff;border:none;border-radius:14px;cursor:pointer;font-weight:700;font-size:14px;">💾 Save Hotkeys</button>' +
+        '</div>';
+    }
+
+    function buildDiscordViewHtml(savedWebhook) {
+        return '<div style="background:linear-gradient(135deg, #5865F2 0%, #4752c4 100%);padding:16px 20px;display:flex;align-items:center;gap:12px;">' +
+            '<h2 style="margin:0;font-size:18px;font-weight:700;color:#fff;">💬 Discord</h2>' +
+        '</div>' +
+        '<div style="flex:1;overflow-y:auto;padding:16px;">' +
+            '<div style="background:#fff;border-radius:16px;padding:16px;margin-bottom:16px;">' +
+                '<div style="font-size:12px;color:#6b7280;font-weight:700;margin-bottom:12px;">🔗 Webhook URL</div>' +
+                '<input type="text" id="geohelper-discord-webhook" value="' + Security.escapeAttr(savedWebhook) + '" placeholder="https://discord.com/api/webhooks/..." style="width:100%;padding:14px;border:2px solid #e5e7eb;border-radius:12px;font-size:13px;">' +
+            '</div>' +
+            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">' +
+                '<button id="geohelper-discord-save" style="padding:14px;background:linear-gradient(135deg, #5865F2 0%, #4752c4 100%);color:#fff;border:none;border-radius:14px;cursor:pointer;font-weight:700;">💾 Save</button>' +
+                '<button id="geohelper-discord-test" style="padding:14px;background:#fff;color:#5865F2;border:2px solid #5865F2;border-radius:14px;cursor:pointer;font-weight:700;">🧪 Test</button>' +
+            '</div>' +
+        '</div>';
+    }
+
+    function buildCopyViewHtml() {
+        return '<div style="background:linear-gradient(135deg, #f59e0b 0%, #d97706 100%);padding:16px 20px;display:flex;align-items:center;gap:12px;">' +
+            '<h2 style="margin:0;font-size:18px;font-weight:700;color:#fff;">📋 Copy</h2>' +
+        '</div>' +
+        '<div style="flex:1;overflow-y:auto;padding:16px;">' +
+            '<div style="background:#fff;border-radius:16px;padding:20px;margin-bottom:16px;">' +
+                '<div id="geohelper-copy-coords" style="font-family:monospace;font-size:16px;font-weight:600;text-align:center;padding:16px;background:#f9fafb;border-radius:12px;">Waiting for location...</div>' +
+            '</div>' +
+            '<button id="geohelper-copy-main" style="width:100%;padding:16px;background:linear-gradient(135deg, #f59e0b 0%, #d97706 100%);color:#fff;border:none;border-radius:16px;cursor:pointer;font-size:15px;font-weight:600;">📋 Copy Coordinates</button>' +
+        '</div>';
+    }
+
+    function buildMapsViewHtml() {
+        return '<div style="background:linear-gradient(135deg, #1a73e8 0%, #1557b0 100%);padding:16px 20px;display:flex;align-items:center;gap:12px;">' +
+            '<h2 style="margin:0;font-size:18px;font-weight:700;color:#fff;">🗺️ Maps</h2>' +
+        '</div>' +
+        '<div style="flex:1;overflow-y:auto;padding:16px;">' +
+            '<div style="background:#fff;border-radius:16px;overflow:hidden;margin-bottom:16px;">' +
+                '<div style="padding:14px 16px;border-bottom:1px solid #f3f4f6;font-size:13px;font-weight:600;">🎨 Map Layer Style</div>' +
+                '<button data-map-layer="default" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-default" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">OpenStreetMap</span></button>' +
+                '<button data-map-layer="dark" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-dark" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">Carto Dark</span></button>' +
+                '<button data-map-layer="light" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-light" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">Carto Light</span></button>' +
+                '<button data-map-layer="terrain" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-terrain" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">OpenTopoMap</span></button>' +
+                '<button data-map-layer="voyager" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-voyager" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">Voyager</span></button>' +
+                '<button data-map-layer="positron" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-positron" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">Positron</span></button>' +
+                '<button data-map-layer="satellite" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;border-bottom:1px solid #f3f4f6;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-satellite" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">ESRI Satellite</span></button>' +
+                '<button data-map-layer="hybrid" style="width:100%;display:flex;align-items:center;gap:14px;padding:16px;background:#fff;border:none;cursor:pointer;text-align:left;"><div style="width:20px;height:20px;border-radius:50%;border:2px solid #e5e7eb;display:flex;align-items:center;justify-content:center;"><div class="layer-indicator-hybrid" style="width:10px;height:10px;border-radius:50%;"></div></div><span style="font-size:15px;">Satellite Hybrid</span></button>' +
+            '</div>' +
+            '<div id="geohelper-open-gmaps" style="background:#fff;border-radius:16px;padding:16px;cursor:pointer;display:flex;align-items:center;gap:14px;">' +
+                '<div style="width:44px;height:44px;background:#eff6ff;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px;">🌐</div>' +
+                '<div style="flex:1;"><div style="font-size:15px;font-weight:500;">Open in Google Maps</div><div style="font-size:13px;color:#6b7280;">View current location</div></div>' +
+                '<span style="font-size:20px;color:#9ca3af;">›</span>' +
+            '</div>' +
+        '</div>';
+    }
+
+    function buildHistoryViewHtml() {
+        return '<div style="background:linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);padding:16px 20px;display:flex;align-items:center;justify-content:space-between;">' +
+            '<div style="display:flex;align-items:center;gap:12px;">' +
+                '<h2 style="margin:0;font-size:18px;font-weight:700;color:#fff;">📜 History</h2>' +
+            '</div>' +
+            '<div id="geohelper-history-count" style="background:rgba(255,255,255,0.2);padding:4px 10px;border-radius:12px;font-size:11px;color:#fff;font-weight:600;">0 rounds</div>' +
+        '</div>' +
+        '<div id="geohelper-history-content" style="flex:1;overflow-y:auto;padding:16px;">' +
+            '<div id="geohelper-history-list"></div>' +
+        '</div>';
+    }
+
+    function buildHistoryEmptyStateHtml() {
+        return '<div style="text-align:center;padding:40px 20px;">' +
+            '<div style="font-size:48px;margin-bottom:16px;opacity:0.5;">📭</div>' +
+            '<div style="color:#6b7280;font-size:14px;font-weight:500;margin-bottom:8px;">No History Yet</div>' +
+            '<div style="color:#9ca3af;font-size:12px;">Play a round to start tracking your locations</div>' +
+        '</div>';
+    }
+
+    function buildHistoryActionRowsHtml() {
+        const undoEnabled = !!state.lastImportBackup;
+        const undoBg = undoEnabled ? '#fff' : '#f3f4f6';
+        const undoColor = undoEnabled ? '#111827' : '#9ca3af';
+        const undoCursor = undoEnabled ? 'pointer' : 'not-allowed';
+
+        return '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;">' +
+            '<button data-history-action="copy-latest" style="flex:1;min-width:80px;padding:10px;border:1px solid #d1d5db;background:#fff;border-radius:10px;cursor:pointer;font-size:12px;font-weight:600;">📋 Copy Latest</button>' +
+            '<button data-history-action="copy-all" style="flex:1;min-width:80px;padding:10px;border:1px solid #d1d5db;background:#fff;border-radius:10px;cursor:pointer;font-size:12px;font-weight:600;">📄 Copy All</button>' +
+        '</div>' +
+        '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;">' +
+            '<button data-history-action="export-json" style="flex:1;padding:10px;border:1px solid #d1d5db;background:#fff;border-radius:10px;cursor:pointer;font-size:12px;font-weight:600;">💾 JSON</button>' +
+            '<button data-history-action="export-csv" style="flex:1;padding:10px;border:1px solid #d1d5db;background:#fff;border-radius:10px;cursor:pointer;font-size:12px;font-weight:600;">📊 CSV</button>' +
+            '<button data-history-action="import-json" style="flex:1;padding:10px;border:1px solid #d1d5db;background:#fff;border-radius:10px;cursor:pointer;font-size:12px;font-weight:600;">📥 Import</button>' +
+            '<button data-history-action="undo-import" style="flex:1;padding:10px;border:1px solid #d1d5db;background:' + undoBg + ';color:' + undoColor + ';border-radius:10px;cursor:' + undoCursor + ';font-size:12px;font-weight:600;">↩️ Undo</button>' +
+        '</div>';
+    }
+
+    function buildHistoryEntryCardHtml(entry) {
+        const time = new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const date = new Date(entry.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' });
+        const safeAddress = Security.escapeHtml(entry.address);
+
+        return '<div style="background:#fff;border-radius:14px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,0.08);">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">' +
+                '<div style="display:flex;align-items:center;gap:8px;">' +
+                    '<span style="background:linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);color:#fff;padding:4px 10px;border-radius:8px;font-size:11px;font-weight:700;">R' + entry.round + '</span>' +
+                    '<span style="font-size:11px;color:#9ca3af;">' + date + ' ' + time + '</span>' +
+                '</div>' +
+                '<button data-copy-entry="' + entry.round + '" style="background:#f3f4f6;border:none;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;">📋</button>' +
+            '</div>' +
+            '<div style="font-size:13px;color:#374151;line-height:1.4;margin-bottom:6px;font-weight:500;">' + safeAddress + '</div>' +
+            '<div style="font-family:monospace;font-size:12px;color:#6b7280;background:#f9fafb;padding:6px 10px;border-radius:8px;">' + entry.lat.toFixed(6) + ', ' + entry.lng.toFixed(6) + '</div>' +
+        '</div>';
+    }
+
+    function buildRoundHistoryRowsHtml(history) {
+        return history.map((entry) => {
+            const time = new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            return '<div style="padding:10px 12px;border:1px solid #e5e7eb;border-radius:10px;background:#fff;margin-bottom:8px;">' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">' +
+                    '<span style="font-size:11px;color:#6b7280;font-weight:700;">ROUND ' + entry.round + '</span>' +
+                    '<span style="font-size:11px;color:#9ca3af;">' + time + '</span>' +
+                '</div>' +
+                '<div style="font-size:12px;color:#374151;line-height:1.3;margin-bottom:4px;">' + Security.escapeHtml(entry.address) + '</div>' +
+                '<div style="font-family:monospace;font-size:12px;color:#111827;">' + entry.lat.toFixed(5) + ', ' + entry.lng.toFixed(5) + '</div>' +
+            '</div>';
+        }).join('');
+    }
+
+    function buildRoundHistoryHeaderActionsHtml() {
+        const undoEnabled = !!state.lastImportBackup;
+        const undoBg = undoEnabled ? '#fff' : '#f3f4f6';
+        const undoColor = undoEnabled ? '#111827' : '#9ca3af';
+        const undoCursor = undoEnabled ? 'pointer' : 'not-allowed';
+
+        return '<div style="display:flex;gap:6px;">' +
+            '<button data-history-action="copy-latest" style="padding:6px 10px;border:1px solid #d1d5db;background:#fff;border-radius:8px;cursor:pointer;font-size:11px;">Copy Latest</button>' +
+            '<button data-history-action="copy-all" style="padding:6px 10px;border:1px solid #d1d5db;background:#fff;border-radius:8px;cursor:pointer;font-size:11px;">Copy All</button>' +
+            '<button data-history-action="export-json" style="padding:6px 10px;border:1px solid #d1d5db;background:#fff;border-radius:8px;cursor:pointer;font-size:11px;">JSON</button>' +
+            '<button data-history-action="export-csv" style="padding:6px 10px;border:1px solid #d1d5db;background:#fff;border-radius:8px;cursor:pointer;font-size:11px;">CSV</button>' +
+            '<button data-history-action="import-json" style="padding:6px 10px;border:1px solid #d1d5db;background:#fff;border-radius:8px;cursor:pointer;font-size:11px;">Import</button>' +
+            '<button data-history-action="undo-import" style="padding:6px 10px;border:1px solid #d1d5db;background:' + undoBg + ';color:' + undoColor + ';border-radius:8px;cursor:' + undoCursor + ';font-size:11px;">Undo</button>' +
+        '</div>';
+    }
+
+    function getHistoryRenderSignature() {
+        const top = state.roundHistory?.[0];
+        const topKey = top ? `${top.round}|${top.timestamp}|${top.lat.toFixed(5)}|${top.lng.toFixed(5)}` : 'none';
+        const undo = state.lastImportBackup ? 1 : 0;
+        return `${state.roundHistory?.length || 0}|${topKey}|${undo}`;
+    }
+
+    function buildAddressResolvedHtml(addressObj) {
+        const formatted = Security.escapeHtml(formatAddress(addressObj) || 'Unknown location');
+        const countryCodeRaw = String(addressObj?.address?.country_code || '').toLowerCase().replace(/[^a-z]/g, '');
+        const countryCode = countryCodeRaw.length === 2 ? countryCodeRaw : '';
+        const countryName = Security.escapeHtml(addressObj?.address?.country || (countryCode ? countryCode.toUpperCase() : ''));
+        const countryCodeLabel = Security.escapeHtml(countryCode.toUpperCase());
+
+        const flagRow = countryCode
+            ? '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #2a303a;">' +
+                '<img src="https://flagcdn.com/32x24/' + countryCode + '.png" style="width:32px;height:auto;border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,0.15);" alt="' + countryCodeLabel + '"/>' +
+                '<div>' +
+                    '<div style="font-size:14px;font-weight:700;color:#f3f4f6;">' + countryName + '</div>' +
+                    '<div style="font-size:11px;color:#9ca3af;">' + countryCodeLabel + '</div>' +
+                '</div>' +
+            '</div>'
+            : '';
+
+        return '<div style="margin-bottom:12px;">' +
+            '<div style="background:#15181d;padding:14px;border-radius:14px;border:1px solid #262b34;box-shadow:none;">' +
+                flagRow +
+                '<div style="font-size:13px;color:#e5e7eb;line-height:1.5;">' + formatted + '</div>' +
+            '</div>' +
+        '</div>';
+    }
+
+    function buildAddressLoadingHtml() {
+        return '<div style="margin-bottom:12px;">' +
+            '<div style="background:#15181d;padding:14px;border-radius:14px;border:1px solid #262b34;box-shadow:none;">' +
+                '<div style="display:flex;align-items:center;gap:8px;">' +
+                    '<div style="width:8px;height:8px;border-radius:50%;background:#fbbf24;animation:pulse 1.5s infinite;"></div>' +
+                    '<span style="font-size:13px;color:#d1d5db;">Loading address...</span>' +
+                '</div>' +
+            '</div>' +
+        '</div>';
+    }
+
+    function buildLocationSearchingHtml() {
+        return '<div style="text-align:center;padding:30px 16px;">' +
+            '<div style="font-size:36px;margin-bottom:12px;">🛰️</div>' +
+            '<div style="color:#e5e7eb;font-size:13px;font-weight:500;">Searching for location...</div>' +
+            '<div style="color:#9ca3af;font-size:11px;margin-top:6px;">This may take a few seconds</div>' +
+        '</div>';
+    }
+
+    function createInfoDisplay() {
+
+        const phoneFrame = document.createElement('div');
+        phoneFrame.id = 'geohelper-phone-frame';
+        phoneFrame.style.cssText = `
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            width: 320px;
+            background: #000000;
+            border-radius: 30px;
+            padding: 10px;
+            z-index: 999998;
+            display: none;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.4), 0 0 0 2px #1a1a1a;
+            border: 3px solid #1a1a1a;
+            user-select: none;
+            -webkit-user-select: none;
+        `;
+
+        const screenContainer = document.createElement('div');
+        screenContainer.style.cssText = `
+            background: #ffffff;
+            border-radius: 25px;
+            overflow: hidden;
+            height: 520px;
+            position: relative;
+        `;
+
+        const statusBar = document.createElement('div');
+        statusBar.style.cssText = `
+            background: #000;
+            color: #fff;
+            padding: 8px 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: grab;
+            user-select: none;
+        `;
+        statusBar.innerHTML = buildPhoneStatusBarHtml();
+
+        const contentArea = document.createElement('div');
+        contentArea.style.cssText = `
+            background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);
+            height: calc(100% - 35px);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        `;
+
+        const viewsContainer = document.createElement('div');
+        viewsContainer.id = 'geohelper-views-container';
+        viewsContainer.style.cssText = `
+            display: flex;
+            transition: transform 0.3s ease;
+            height: 100%;
+        `;
+
+        const mapView = document.createElement('div');
+        mapView.id = 'geohelper-map-view';
+        mapView.style.cssText = `min-width: 100%; display: flex; flex-direction: column; background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);`;
+
+        const mapSection = document.createElement('div');
+        mapSection.id = 'geohelper-minimap-container';
+        mapSection.style.cssText = `height: 280px; position: relative; background: #cbd5e1; flex-shrink: 0; overflow: hidden;`;
+        mapSection.innerHTML = buildMiniMapSectionHtml();
+
+        const locationInfo = document.createElement('div');
+        locationInfo.id = 'geohelper-location-info';
+        locationInfo.style.cssText = `flex: 1; background: #0f1319; padding: 12px 16px; overflow-y: auto;`;
+        locationInfo.innerHTML = buildLocationPlaceholderHtml();
+
+        mapView.appendChild(mapSection);
+        mapView.appendChild(locationInfo);
+
+        const menuView = document.createElement('div');
+        menuView.id = 'geohelper-menu-view';
+        menuView.style.cssText = `min-width: 100%; display: flex; flex-direction: column; background: linear-gradient(180deg, #667eea 0%, #764ba2 100%); padding: 16px 12px;`;
+
+        const appGrid = document.createElement('div');
+        appGrid.style.cssText = `display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px 10px; flex: 1; align-content: start;`;
+
+        const appIcons = [
+            { id: 'geohelper-maps-btn', icon: '🗺️', label: 'Maps', bg: 'linear-gradient(135deg, #1a73e8 0%, #1557b0 100%)' },
+            { id: 'geohelper-copy-btn', icon: '📋', label: 'Copy', bg: 'linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%)' },
+            { id: 'geohelper-action-mark', icon: '📍', label: 'Mark', bg: 'linear-gradient(135deg, #10b981 0%, #059669 100%)' },
+            { id: 'geohelper-action-safe', icon: '🎲', label: 'Safe', bg: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)' },
+            { id: 'geohelper-action-refresh', icon: '🔄', label: 'Refresh', bg: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' },
+            { id: 'geohelper-app-history', icon: '📜', label: 'History', bg: 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)' },
+            { id: 'geohelper-app-hotkeys', icon: '⌨️', label: 'Hotkeys', bg: 'linear-gradient(135deg, #ec4899 0%, #be185d 100%)' },
+            { id: 'geohelper-app-discord', icon: '💬', label: 'Discord', bg: 'linear-gradient(135deg, #5865F2 0%, #4752c4 100%)' },
+            { id: 'geohelper-app-settings', icon: '⚙️', label: 'Settings', bg: 'linear-gradient(135deg, #6b7280 0%, #374151 100%)' }
+        ];
+
+        appIcons.forEach(app => {
+            const appBtn = document.createElement('div');
+            appBtn.id = app.id;
+            appBtn.className = 'geohelper-app-btn';
+            appBtn.style.cssText = `display: flex; flex-direction: column; align-items: center; gap: 5px; cursor: pointer; transition: transform 0.15s; user-select: none;`;
+            appBtn.innerHTML = buildAppButtonHtml(app);
+            appBtn.onmouseenter = function() { this.style.transform = 'scale(1.05)'; };
+            appBtn.onmouseleave = function() { this.style.transform = 'scale(1)'; };
+            appBtn.addEventListener('click', (e) => e.stopPropagation());
+            appGrid.appendChild(appBtn);
+        });
+
+        menuView.appendChild(appGrid);
+
+        const settingsView = document.createElement('div');
+        settingsView.id = 'geohelper-settings-view';
+        settingsView.style.cssText = `min-width: 100%; display: flex; flex-direction: column; background: #f3f4f6; height: 100%;`;
+
+        const savedHotkeys = getHotkeys();
+        const savedWebhook = safeGM_getValue(CONFIG.STORAGE_KEYS.DISCORD_WEBHOOK, '');
+
+        settingsView.innerHTML = buildSettingsViewHtml();
+
+        const hotkeysView = document.createElement('div');
+        hotkeysView.id = 'geohelper-hotkeys-view';
+        hotkeysView.style.cssText = `min-width: 100%; display: flex; flex-direction: column; background: #f3f4f6; height: 100%;`;
+        hotkeysView.innerHTML = buildHotkeysViewHtml(savedHotkeys);
+
+        const discordView = document.createElement('div');
+        discordView.id = 'geohelper-discord-view';
+        discordView.style.cssText = `min-width: 100%; display: flex; flex-direction: column; background: #f3f4f6; height: 100%;`;
+        discordView.innerHTML = buildDiscordViewHtml(savedWebhook);
+
+        const copyView = document.createElement('div');
+        copyView.id = 'geohelper-copy-view';
+        copyView.style.cssText = `min-width: 100%; display: flex; flex-direction: column; background: #f3f4f6; height: 100%;`;
+        copyView.innerHTML = buildCopyViewHtml();
+
+        const mapsView = document.createElement('div');
+        mapsView.id = 'geohelper-maps-view';
+        mapsView.style.cssText = `min-width: 100%; display: flex; flex-direction: column; background: #f3f4f6; height: 100%;`;
+        mapsView.innerHTML = buildMapsViewHtml();
+
+        const historyView = document.createElement('div');
+        historyView.id = 'geohelper-history-view';
+        historyView.style.cssText = `min-width: 100%; display: flex; flex-direction: column; background: #f3f4f6; height: 100%;`;
+        historyView.innerHTML = buildHistoryViewHtml();
+
+        viewsContainer.appendChild(mapView);
+        viewsContainer.appendChild(menuView);
+        viewsContainer.appendChild(settingsView);
+        viewsContainer.appendChild(hotkeysView);
+        viewsContainer.appendChild(discordView);
+        viewsContainer.appendChild(copyView);
+        viewsContainer.appendChild(mapsView);
+        viewsContainer.appendChild(historyView);
+        contentArea.appendChild(viewsContainer);
+
+        const navBar = document.createElement('div');
+        navBar.id = 'geohelper-nav-bar';
+        navBar.style.cssText = 'position:absolute;left:0;right:0;bottom:-1px;display:flex;align-items:flex-end;z-index:1000;';
+
+        const navShell = document.createElement('div');
+        navShell.id = 'geohelper-nav-shell';
+        navShell.style.cssText = 'width:100%;padding:0;border-radius:0;';
+
+        const navStrip = document.createElement('div');
+        navStrip.id = 'geohelper-nav-strip';
+        navStrip.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:18px;padding:5px 0 4px;border-radius:0;background:#05070b;';
+
+        const menuBtn = document.createElement('button');
+        menuBtn.id = 'geohelper-nav-menu-btn';
+        menuBtn.type = 'button';
+        menuBtn.textContent = '☰';
+        menuBtn.style.cssText = 'width:44px;height:20px;border:none;background:transparent;color:#f3f4f6;font-size:11px;font-weight:800;cursor:pointer;letter-spacing:1px;border-radius:4px;';
+
+        const homeBtn = document.createElement('button');
+        homeBtn.id = 'geohelper-nav-home-btn';
+        homeBtn.type = 'button';
+        homeBtn.textContent = '▢';
+        homeBtn.style.cssText = 'width:44px;height:20px;border:none;background:transparent;color:#f3f4f6;font-size:13px;font-weight:700;cursor:pointer;border-radius:4px;';
+
+        const swapBtn = document.createElement('button');
+        swapBtn.id = 'geohelper-nav-toggle-btn';
+        swapBtn.type = 'button';
+        swapBtn.textContent = '<';
+        swapBtn.style.cssText = 'width:44px;height:20px;border:none;background:transparent;color:#f3f4f6;font-size:13px;font-weight:700;cursor:pointer;border-radius:4px;';
+
+        navStrip.appendChild(menuBtn);
+        navStrip.appendChild(homeBtn);
+        navStrip.appendChild(swapBtn);
+        navShell.appendChild(navStrip);
+        navBar.appendChild(navShell);
+        contentArea.appendChild(navBar);
+
+        const homeIndicator = document.createElement('div');
+        homeIndicator.style.cssText = 'display:none;';
+
+        screenContainer.appendChild(statusBar);
+        screenContainer.appendChild(contentArea);
+        screenContainer.appendChild(homeIndicator);
+        phoneFrame.appendChild(screenContainer);
+        document.body.appendChild(phoneFrame);
+
+        let currentView = 'map';
+        state.phoneView = currentView;
+
+        const syncBottomNavState = (view) => {
+            if (menuBtn) {
+                const menuActive = view === 'menu';
+                menuBtn.style.color = menuActive ? '#ffffff' : '#9ca3af';
+                menuBtn.style.background = 'transparent';
+            }
+            if (homeBtn) {
+                const homeActive = view === 'map';
+                homeBtn.style.color = homeActive ? '#ffffff' : '#9ca3af';
+                homeBtn.style.background = 'transparent';
+            }
+            if (swapBtn) {
+                swapBtn.style.color = '#ffffff';
+                swapBtn.style.background = 'transparent';
+            }
+        };
+
+        const swapToView = (view) => {
+            if (view === currentView) return;
+            const toOffset = getPhoneViewOffset(view);
+            currentView = view;
+            state.phoneView = currentView;
+
+            viewsContainer.style.transform = `translateX(${toOffset}%)`;
+            syncBottomNavState(view);
+
+            navBar.style.display = 'flex';
+
+            if (view === 'settings') syncPanelSettingsUiFromState();
+            if (view === 'copyApp') {
+                const refs = getUiRefs();
+                const coordsDisplay = refs.copyCoords;
+                if (coordsDisplay) {
+                    const coords = extractCoordinates();
+                    coordsDisplay.textContent = coords && Validators.isValidCoord(coords.lat, coords.lng)
+                        ? `${coords.lat.toFixed(6)}, ${coords.lng.toFixed(6)}`
+                        : 'Waiting for location...';
+                }
+            }
+            if (view === 'mapsApp') setMapLayerButtonsUi(mapsView);
+            if (view === 'historyApp') refreshHistoryView();
+
+            applyPhoneLikeButtonTheme(phoneFrame);
+        };
+        state.swapPhoneView = swapToView;
+
+        bindPhoneNavigationButtons(menuBtn, homeBtn, swapBtn, swapToView, () => currentView, syncBottomNavState);
+        bindPhoneAppLauncherButtons(swapToView);
+        bindPhoneUtilityButtons(mapsView);
+        enablePhoneDragAndClock(phoneFrame, statusBar);
+
+        cacheOriginalInlineStyles(phoneFrame);
+        applyPhoneLikeButtonTheme(phoneFrame);
+        applyOneUiAppViews(phoneFrame, true);
+        wirePhoneSettings(phoneFrame);
+
+        state._uiRefs = {
+            display: phoneFrame,
+            locationInfo,
+            statusBadge: phoneFrame.querySelector('#geohelper-status-badge'),
+            coordsOverlay: phoneFrame.querySelector('#geohelper-coords-overlay'),
+            copyCoords: phoneFrame.querySelector('#geohelper-copy-coords')
+        };
+
+        return phoneFrame;
+    }
+
+    function updateInfoDisplay() {
+        let refs = getUiRefs();
+        let display = refs.display;
+        if (!display) {
+            display = createInfoDisplay();
+            refs = getUiRefs();
+        }
+
+        const locationInfo = refs.locationInfo;
+        const statusBadge = refs.statusBadge;
+        const coordsOverlay = refs.coordsOverlay;
+
+        if (!locationInfo) return;
+
+        if (state.infoVisible) {
+            const freshCoords = extractCoordinates();
+            const coords = (freshCoords && Validators.isValidCoord(freshCoords.lat, freshCoords.lng))
+            ? freshCoords
+            : (Validators.isValidCoord(state.coords.lat, state.coords.lng) ? state.coords : null);
+
+            let html = '';
+
+            if (coords && Validators.isValidCoord(coords.lat, coords.lng)) {
+                state.coords = coords;
+
+                if (coordsOverlay) {
+                    coordsOverlay.textContent = `${coords.lat.toFixed(5)}, ${coords.lng.toFixed(5)}`;
+                }
+
+                if (statusBadge) {
+                    statusBadge.style.background = 'rgba(74,222,128,0.95)';
+                    statusBadge.style.color = '#064e3b';
+                    statusBadge.textContent = '✓ Location Found';
+                }
+
+                updateLedIndicator('ready');
+
+                if (!state.address) {
+                    const lookupKey = `${coords.lat},${coords.lng}`;
+                    if (state._pendingAddressCoords !== lookupKey) {
+                        state._pendingAddressCoords = lookupKey;
+                        const panelAddressToken = state.runtime?.flags?.USE_REQUEST_TOKENING
+                        ? RequestTokens.issue('address_panel')
+                        : 0;
+                        if (state.runtime?.flags?.USE_REQUEST_TOKENING) {
+                            telemetryInc('async.addressIssued');
+                        }
+                        lookupAddress(coords.lat, coords.lng).then(addr => {
+                            if (state.runtime?.flags?.USE_REQUEST_TOKENING) {
+                                const stillCurrent = RequestTokens.isCurrent('address_panel', panelAddressToken);
+                                if (state._pendingAddressCoords === lookupKey && stillCurrent) {
+                                    if (applyAddressIfCurrent(coords, addr)) {
+                                        telemetryInc('async.addressApplied');
+                                        syncLatestHistoryAddress(coords, addr);
+                                        updateInfoDisplay();
+                                    }
+                                } else {
+                                    telemetryInc('async.addressDiscardedStale');
+                                }
+                            } else if (state._pendingAddressCoords === lookupKey) {
+                                if (applyAddressIfCurrent(coords, addr)) {
+                                    syncLatestHistoryAddress(coords, addr);
+                                    updateInfoDisplay();
+                                }
+                            }
+                        }).catch(() => Logger.debug('Address lookup pending...'));
+                    }
+                }
+
+                html = state.address ? buildAddressResolvedHtml(state.address) : buildAddressLoadingHtml();
+            } else {
+                if (statusBadge) {
+                    statusBadge.style.background = 'rgba(251,191,36,0.95)';
+                    statusBadge.style.color = '#78350f';
+                    statusBadge.textContent = '⏳ Searching...';
+                }
+
+                updateLedIndicator('waiting');
+
+                html = buildLocationSearchingHtml();
+            }
+
+            if (uiRenderCache.locationHtml !== html) {
+                locationInfo.innerHTML = html;
+                uiRenderCache.locationHtml = html;
+            }
+
+            display.style.display = 'block';
+            state.miniMapVisible = true;
+
+            if (!panelUiBootstrapped) {
+                applyPhoneLikeButtonTheme(display);
+                applyOneUiAppViews(display);
+                setupActionButtons();
+
+                setTimeout(() => {
+                    initMiniMap();
+                    updateMiniMap();
+                }, 200);
+
+                panelUiBootstrapped = true;
+            }
+        } else {
+            display.style.display = 'none';
+            state.miniMapVisible = false;
+            uiRenderCache.locationHtml = '';
+        }
+    }
+
+    // ========================================================================
+    // [SECTION 25-B] DEBUG / TELEMETRY SURFACING (PHASE 1)
+    // ========================================================================
+
+    function installDebugBridge() {
+
+        const pw = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+
+        if (pw.__btpDebug) {
+            pw.__btpDebug._stage = 'initialized';
+            Logger.debug('[Debug] Bridge upgraded to initialized stage');
+        } else if (window.__btpDebug) {
+
+            window.__btpDebug._stage = 'initialized';
+            pw.__btpDebug = window.__btpDebug;
+            Logger.debug('[Debug] Bridge re-exposed to page window');
+        } else {
+            Logger.warn('[Debug] Early bridge missing - this should not happen');
+        }
+    }
+
+    function uninstallDebugBridge() {
+        try {
+            delete window.__btpDebug;
+        } catch (e) {
+            window.__btpDebug = null;
+        }
+        try {
+            const pw = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            delete pw.__btpDebug;
+        } catch (e) {
+
+        }
+    }
+
+    function collectPerformanceSnapshot() {
+        return {
+            monitoring: {
+                intervalActive: !!monitoringInterval,
+                busy: !!monitoringBusy,
+                failCount: Number(monitoringFailCount || 0),
+                errorStreak: Number(monitoringConsecutiveErrors || 0),
+                tickCounter: Number(monitoringTickCounter || 0)
+            },
+            address: {
+                queueLength: Array.isArray(addressQueue) ? addressQueue.length : 0,
+                processing: !!addressProcessing,
+                backoffMs: Number(addressBackoffMs || 0),
+                consecutiveErrors: Number(addressConsecutiveErrors || 0)
+            },
+            renderCache: {
+                hasLocationHtml: !!uiRenderCache.locationHtml,
+                historySignature: uiRenderCache.historySignature || '',
+                statusText: uiRenderCache.statusText || '',
+                ledStatus: uiRenderCache.ledStatus || ''
+            },
+            extractionCache: extractionCache.getStats(),
+            timestamp: Date.now()
+        };
+    }
+
+    // ========================================================================
+    // [SECTION 26] INITIALIZATION & CLEANUP
+    // ========================================================================
+
+    function init() {
+        if (isInitialized || window[INIT_GUARD_KEY]) {
+            Logger.debug('Init skipped: already initialized');
+            return;
+        }
+
+        isInitialized = true;
+        isCleaningUp = false;
+        window[INIT_GUARD_KEY] = true;
+        window[CLEANUP_GUARD_KEY] = false;
+        oneUiViewsStyled = false;
+        panelUiBootstrapped = false;
+        monitoringBusySince = 0;
+        monitoringTickCounter = 0;
+        state._uiRefs = null;
+        uiRenderCache.locationHtml = '';
+        uiRenderCache.historySignature = '';
+        uiRenderCache.statusText = '';
+        uiRenderCache.statusColor = '';
+        uiRenderCache.badgeText = '';
+        uiRenderCache.badgeBg = '';
+        uiRenderCache.ledStatus = '';
+
+        Logger.initDebugFlag();
+
+        state.platform = detectPlatform();
+
+        Logger.info('========================================');
+        Logger.info(`${CONFIG.NAME} v${CONFIG.VERSION}`);
+        Logger.info('Platform:', state.platform);
+        Logger.info('========================================');
+
+        applySettingsToState(readStoredSettings());
+
+        state.roundHistory = [];
+        state.lastImportBackup = null;
+
+        Logger.debug('Settings loaded');
+
+        installDebugBridge();
+
+        IntegrityManager.start();
+
+        document.addEventListener('keydown', handleKeydown, true);
+        Logger.debug('Keyboard listener attached');
+
+        startMonitoring();
+        Logger.debug('Coordinate monitoring started');
+
+        setTimeout(() => {
+            Logger.debug('Attempting to find map instance...');
+            findMapInstance();
+        }, CONFIG.TIMING.MAP_FIND_DELAY);
+
+        let lastUrl = window.location.href;
+        const spaCheckInterval = setInterval(() => {
+            const currentUrl = window.location.href;
+            if (currentUrl !== lastUrl) {
+                lastUrl = currentUrl;
+                Logger.debug('SPA navigation detected:', currentUrl);
+
+                if (!XMLHttpRequest.prototype[XHR_PATCH_FLAG]) {
+                    Logger.warn('XHR interceptor lost after navigation - reinstalling');
+                    if (state.runtime?.flags?.USE_PATCH_MANAGER) {
+                        PatchManager.ensureXHRPatch();
+                    } else {
+                        installXHRInterceptor();
+                    }
+                }
+
+                extractionCache.invalidate();
+                interceptedCoords = { lat: null, lng: null };
+                state.gameMap = null;
+
+                setTimeout(() => findMapInstance(), 2000);
+            }
+        }, 1000);
+        if (!window.__btp_spa_interval) {
+            window.__btp_spa_interval = spaCheckInterval;
+        }
+
+        const style = document.createElement('style');
+        style.textContent = '@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}@keyframes btpFadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}';
+        document.head.appendChild(style);
+
+        Logger.info('✅ Initialization complete!');
+        Logger.info('📌 HOTKEYS:');
+        Logger.info(`   ${state.hotkeys.panel} - Toggle Panel`);
+        Logger.info(`   ${state.hotkeys.info} - Quick Open Menu`);
+        Logger.info(`   ${state.hotkeys.marker} - Place Marker`);
+        Logger.info(`   ${state.hotkeys.googleMaps} - Open Google Maps`);
+        Logger.info(`   ${state.hotkeys.copyCoords} - Copy Coordinates`);
+        Logger.info('');
+        Logger.info('🤖 AUTO FEATURES:');
+        Logger.info(`   Auto Marker: ${state.features.autoMarker ? '✅ ON' : '❌ OFF'}`);
+        Logger.info(`   Auto Pin: ${state.features.autoPin ? '✅ ON' : '❌ OFF'}`);
+        Logger.info(`   Safe Mode: ${state.features.safeMode ? '✅ ON' : '❌ OFF'}`);
+        Logger.info('');
+        Logger.info(`🚀 Press ${state.hotkeys.panel} to show panel`);
+    }
+
+    function cleanup() {
+        if (isCleaningUp || window[CLEANUP_GUARD_KEY]) return;
+
+        isCleaningUp = true;
+        window[CLEANUP_GUARD_KEY] = true;
+        Logger.debug('Cleaning up...');
+
+        if (monitoringInterval) {
+            clearInterval(monitoringInterval);
+            monitoringInterval = null;
+        }
+
+        if (phoneClockInterval) {
+            clearInterval(phoneClockInterval);
+            phoneClockInterval = null;
+        }
+
+        if (window.__btp_spa_interval) {
+            clearInterval(window.__btp_spa_interval);
+            window.__btp_spa_interval = null;
+        }
+
+        if (state.runtime?.flags?.USE_PATCH_MANAGER) {
+            PatchManager.uninstallXHRPatch();
+        } else {
+            uninstallXHRInterceptor();
+        }
+
+        document.removeEventListener('keydown', handleKeydown, true);
+
+        if (phoneResizeHandler) {
+            window.removeEventListener('resize', phoneResizeHandler);
+            phoneResizeHandler = null;
+        }
+
+        if (state.marker) {
+            try {
+                if (typeof google !== 'undefined' && google.maps && state.marker.setMap) {
+                    state.marker.setMap(null);
+                } else if (typeof L !== 'undefined' && state.gameMap && state.marker) {
+                    state.gameMap.removeLayer(state.marker);
+                }
+            } catch (e) {
+
+            }
+            state.marker = null;
+        }
+
+        if (state.miniMapMarker && state.miniMap) {
+            try {
+                state.miniMap.removeLayer(state.miniMapMarker);
+            } catch (e) {
+
+            }
+            state.miniMapMarker = null;
+        }
+
+        if (state.miniMap) {
+            try {
+                state.miniMap.off();
+                state.miniMap.remove();
+            } catch (e) {
+
+            }
+            state.miniMap = null;
+            state.miniMapTileLayer = null;
+        }
+
+        document.getElementById('geohelper-phone-frame')?.remove();
+        document.getElementById('geohelper-info')?.remove();
+        state.panel?.remove();
+        state.panel = null;
+
+        uninstallDebugBridge();
+
+        IntegrityManager.stop();
+
+        Throttle.resetAll();
+        RequestTokens.resetAll();
+        lastKeydownTime = 0;
+        discordInFlight = false;
+        monitoringBusy = false;
+        monitoringBusySince = 0;
+        monitoringTickCounter = 0;
+        oneUiViewsStyled = false;
+        panelUiBootstrapped = false;
+        refreshRequestId++;
+        state.roundHistory = [];
+        state.lastImportBackup = null;
+        state.swapPhoneView = null;
+        state.phoneView = 'map';
+        state._uiRefs = null;
+        uiRenderCache.locationHtml = '';
+        uiRenderCache.historySignature = '';
+        uiRenderCache.statusText = '';
+        uiRenderCache.statusColor = '';
+        uiRenderCache.badgeText = '';
+        uiRenderCache.badgeBg = '';
+        uiRenderCache.ledStatus = '';
+
+        isInitialized = false;
+        isCleaningUp = false;
+        window[INIT_GUARD_KEY] = false;
+
+        Logger.debug('Cleanup complete');
+    }
+
+    // ========================================================================
+    // [SECTION 27] ENTRY POINT
+    // ========================================================================
+
+    const pageWindow = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+
+    try {
+        const debugBridge = {
+            version: CONFIG.VERSION,
+            _stage: 'early',
+            getFlags() { return { ...(state.runtime?.flags || {}) }; },
+            getTelemetry() { return telemetrySnapshot(); },
+            getExtractorHealth() { return typeof ExtractorRegistry?.getHealthSnapshot === 'function' ? ExtractorRegistry.getHealthSnapshot() : {}; },
+            getPatchStatus() { return typeof PatchManager?.status === 'function' ? PatchManager.status() : {}; },
+            getProtectionState() { return { ...(state.runtime?.protection || {}) }; },
+            getPerformanceSnapshot() { return collectPerformanceSnapshot(); },
+            runIntegrityCheck(r) { IntegrityManager.runCheck(r || 'manual_debug', true); return true; },
+            getIntegrityDiagnostics() {
+                return {
+                    managerExists: typeof IntegrityManager === 'object',
+                    started: IntegrityManager?.started,
+                    checking: IntegrityManager?.checking,
+                    baselineCaptured: !!baselineFingerprints,
+                    protectionState: { ...(state.runtime?.protection || {}) },
+                    degraded: !!state.runtime?.degraded,
+                    degradedReason: state.runtime?.degradedReason || null,
+                    gmInfoAvailable: typeof GM_info !== 'undefined',
+                    gmInfoHasSource: !!(typeof GM_info !== 'undefined' && (GM_info.scriptSource || GM_info.script?.source || GM_info.script?.code)),
+                    gmInfoKeys: (typeof GM_info !== 'undefined') ? Object.keys(GM_info).join(',') : 'N/A',
+                    gmInfoScriptKeys: (typeof GM_info !== 'undefined' && GM_info.script) ? Object.keys(GM_info.script).join(',') : 'N/A',
+                    gmInfoHandler: (typeof GM_info !== 'undefined') ? (GM_info.scriptHandler || 'unknown') : 'N/A',
+                    sourceLength: getLocalRuntimeSource()?.length || 0,
+                    sourceStrategy: getLocalRuntimeSource() ? 'available' : 'none',
+                    configUrl: CONFIG.VERSION_METADATA_URL,
+                    currentVersion: CONFIG.VERSION,
+                    initCompleted: isInitialized,
+                    intervals: {
+                        check: !!integrityCheckInterval,
+                        heartbeat: !!integrityHeartbeatInterval,
+                        scheduled: !!integrityScheduledTimeout
+                    },
+                    telemetry: telemetry.protection ? { ...telemetry.protection } : {}
+                };
+            },
+            getRuntimeSummary() {
+                return {
+                    platform: state.platform,
+                    initCompleted: isInitialized,
+                    infoVisible: !!state.infoVisible,
+                    miniMapVisible: !!state.miniMapVisible,
+                    coordsValid: Validators.isValidCoord(state.coords?.lat, state.coords?.lng),
+                    hasAddress: !!state.address,
+                    markerPlacedThisRound: !!state.markerPlacedThisRound,
+                    degraded: !!state.runtime?.degraded,
+                    phoneView: state.phoneView || 'map',
+                    timestamp: Date.now()
+                };
+            }
+        };
+
+        window.__btpDebug = debugBridge;
+        pageWindow.__btpDebug = debugBridge;
+
+        console.log('[BintangTobaPro] __btpDebug bridge installed (early stage)');
+    } catch (e) {
+        console.error('[BintangTobaPro] Early debug bridge failed:', e);
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+
+    window.addEventListener('beforeunload', cleanup);
+    window.addEventListener('pagehide', cleanup);
+
+})();
