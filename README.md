@@ -2,6 +2,8 @@
 
 A production-ready real-time map tracking system designed for GeoGuessr monitoring. Features a robust Cloudflare Worker relay and a high-performance React frontend.
 
+---
+
 ## 🚀 Key Features
 
 ### Frontend (React + TS + Leaflet)
@@ -11,14 +13,78 @@ A production-ready real-time map tracking system designed for GeoGuessr monitori
 - **State Management**: LocalStorage persistence for history and settings.
 - **Data Portability**: Export and Import history as JSON.
 - **Premium UI**: Dark mode support, responsive mobile layout, and custom toast notifications.
-- **Diagnostics**: Real-time distance calculation and update counters.
 
 ### Backend (Cloudflare Worker)
 - **High Availability**: Powered by Cloudflare Edge & Durable Objects.
-- **WebSocket Relay**: Low-latency broadcast to multiple viewers.
-- **Validation**: Payload verification using Zod schemas.
+- **WebSocket Relay**: Low-latency broadcast from `GeoGuessr.js` to frontend viewers.
 - **Room Support**: Multiple independent tracking sessions.
-- **Security**: Basic rate limiting and payload validation.
+
+---
+
+## 🛠 Panduan Setup (0% to 100%)
+
+Ikuti panduan berikut untuk menyambungkan `GeoGuessr.js` Anda dengan aplikasi peta Realtime ini.
+
+### 1. Setup Cloudflare Worker (WebSocket Server)
+Worker bertugas sebagai "jembatan" atau server yang merelai koordinat dari Userscript menuju Aplikasi Web (Frontend).
+1. Pastikan Anda sudah membuat akun [Cloudflare](https://dash.cloudflare.com/) dan menginstall `npm`.
+2. Buka terminal di dalam folder `workers/`:
+```bash
+cd workers
+npm install
+npm run deploy
+```
+*Atau jalankan lokal dengan `npx wrangler dev`.*
+3. Catat URL WebSocket yang dihasilkan (Misal: `wss://xxxxx.workers.dev/ws`). URL ini akan kita gunakan di tahap selanjutnya.
+
+### 2. Setup Aplikasi Peta (Frontend)
+Aplikasi ini adalah dashboard peta Leaflet tempat di mana marker akan bergerak secara live menyesuaikan dengan in-game GeoGuessr.
+1. Di direktori utama proyek, install package frontend:
+```bash
+npm install
+```
+2. Anda bebas melakukan deploy Frontend ini ke **GitHub Pages**, **Vercel**, atau **Cloudflare Pages**.
+3. Pastikan mengarahkan environment variable `VITE_WS_URL` ke alamat server Cloudflare Worker Anda (Contoh: `VITE_WS_URL=wss://xxxxx.workers.dev/ws?room=main&role=viewer`). Anda dapat men-setting ini di file `.env.production`.
+4. Build dan deploy:
+```bash
+npm run build
+```
+5. Catat **URL Aplikasi Frontend** Anda setelah berhasil online.
+
+### 3. Konfigurasi `GeoGuessr.js` Userscript
+Userscript Anda (`GeoGuessr.js`) **sudah memiliki fungsionalitas WebSocket secara default**! 
+Anda hanya perlu mengkonfigurasi file script sebelum Anda deploy ke GreasyFork agar dapat "berkomunikasi" dengan server yang sudah Anda baut.
+ 
+1. Buka file `GeoGuessr.js` Anda.
+2. Cari bagian **[SECTION 1] CONSTANTS & CONFIGURATION**.
+3. Temukan object `REALTIME_CONFIG` dan ganti nilainya dengan server Anda sendiri!
+
+```javascript
+        REALTIME_CONFIG: Object.freeze({
+            // 🔹 Ganti dengan alamat WebSocket Server Cloudflare milik Anda:
+            WS_URL: "wss://my-worker-server.workers.dev/ws?room=main&role=sender",
+            
+            // 🔹 Ganti dengan URL Aplikasi Peta (Frontend) milik Anda:
+            MAP_URL: "https://your-domain.com/MapsAppGeoGuessr/",
+            
+            // Anda dapat mengubah nama Room untuk session tracking terpisah:
+            ROOM: "main",
+            HEARTBEAT_INTERVAL: 30000,
+            RECONNECT_MIN_DELAY: 1000,
+            RECONNECT_MAX_DELAY: 30000,
+            QUEUE_SIZE_LIMIT: 50,
+            RATE_LIMIT_MS: 500,
+            DEBUG: true
+        })
+```
+4. Simpan script. Dan install/load ulang userscript di Tampermonkey.
+
+### 4. Mari Bermain!
+Kini kedua script Anda sudah terhubung 100%!
+1. Buka *Frontend Aplikasi Peta* Anda dan pastikan status koneksinya terhubung (Connected).
+2. Buka *GeoGuessr* dan mainkan sebuah game.
+3. Buka menu UI dari userscript dengan tombol `Home` atau logo panel, lalu perhatikan indikator **Real-time Tracking** akan menyala **hijau**!
+4. Secara *seamless* koordinat akan langsung terikirim ke Map dan bergerak sesuai lokasi game Anda!
 
 ---
 
@@ -26,84 +92,26 @@ A production-ready real-time map tracking system designed for GeoGuessr monitori
 
 ```text
 .
-├── workers/               # Cloudflare Worker Backend
+├── workers/               # Cloudflare Worker Backend (WebSocket Server)
 │   ├── src/
-│   │   ├── index.ts      # Worker Entry & Routing
-│   │   ├── relay.ts      # Durable Object Logic
-│   │   └── types.ts      # Shared Zod Schemas
+│   │   ├── index.ts      
+│   │   ├── relay.ts      # Logika Durable Object
+│   │   └── types.ts      
 │   ├── package.json
 │   └── wrangler.toml
-├── src/                   # React Frontend
+├── src/                   # React Frontend (App Peta/Viewer)
 │   ├── components/
-│   │   ├── MapView.tsx   # Leaflet Map logic
-│   │   └── ErrorBoundary.tsx
 │   ├── hooks/
-│   │   └── useRealtimeSocket.ts
-│   ├── utils/
-│   │   └── storage.ts    # Settings & History persistence
-│   ├── App.tsx           # Main Logic & UI
-│   └── types.ts          # Frontend types
-├── .github/workflows/     # CI/CD (GitHub Pages + Workers)
-├── sender-example.js      # Testing tool for senders
+│   ├── App.tsx           
+│   └── types.ts          
 └── README.md
 ```
 
----
-
-## 🛠 Getting Started
-
-### 1. Cloudflare Worker Setup
-```bash
-cd workers
-npm install
-npx wrangler dev
-```
-Note: Ensure you have a Cloudflare account for production deployment.
-
-### 2. Frontend Setup
-```bash
-# In the root directory
-npm install
-npm run dev
-```
-Create a `.env` file or set environment variable:
-`VITE_WS_URL=ws://localhost:8787/ws?room=main&role=viewer`
-
-### 3. Testing with Sender
-```bash
-# Run the example sender script
-node sender-example.js
-```
+## 🔒 Best Practices & Troubleshooting
+- **Strict Configuration**: Pastikan parameter query `role=sender` selalu disisipkan di URL bagi `GeoGuessr.js` (contoh: `WS_URL="...&role=sender"`) dan `role=viewer` bagi Frontend (`VITE_WS_URL="...&role=viewer"`).
+- **Integrity Checks**: Perubahan ini aman dan 100% kompatibel dengan fitur Anti-Tamper / `IntegrityManager` dari Bintang Toba. Modifikasi saja variabel `CONFIG`-nya.
+- **Monitoring**: Gunakan browser dev-tools (Console) untuk melihat logs debug komunikasi socket dari frontend maupun *userscript*-nya langsung (bisa disetel lewat `CONFIG.DEBUG`).
 
 ---
 
-## 🚢 Deployment
-
-### GitHub Pages
-1. Configure `base` in `vite.config.ts` if deploying to a subpath.
-2. Push to `main` branch to trigger `.github/workflows/deploy.yml`.
-3. Set `VITE_WS_URL` in GitHub Secrets.
-
-### Cloudflare Worker
-1. Configure `wrangler.toml`.
-2. Run `npm run deploy` from `workers/` or use the GitHub Action.
-3. Set `CLOUDFLARE_API_TOKEN` in GitHub Secrets.
-
----
-
-## 🔍 Monitoring & Scaling
-
-- **Monitoring**: Use Cloudflare Workers Observability (Logpush/Durable Object Metrics).
-- **Scaling**: Durable Objects scale horizontally by room name. For massive viewer counts, use Cloudflare Pub/Sub or multiple DO instances.
-- **Debugging**: Use `wrangler tail` for backend logs and Browser DevTools for frontend.
-
----
-
-## 🔒 Best Practices
-- **Strict Mode**: TypeScript is set to strict for maximum reliability.
-- **Payload Safety**: Zod ensures the relay only processes valid GeoGuessr data.
-- **Stability**: React Error Boundary prevents app crashes from rendering issues.
-
----
-
-Designed with ❤️ for the GeoGuessr community.
+*Dirancang dengan ❤️ untuk komunitas GeoGuessr.*
